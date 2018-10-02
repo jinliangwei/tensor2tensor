@@ -319,6 +319,7 @@ def get_or_generate_vocab_inner(data_dir, vocab_filename, vocab_size,
   Returns:
     A SubwordTextEncoder vocabulary object.
   """
+  print("get_or_generate_vocab_inner")
   if data_dir and vocab_filename:
     vocab_filepath = os.path.join(data_dir, vocab_filename)
     if tf.gfile.Exists(vocab_filepath):
@@ -342,7 +343,7 @@ def get_or_generate_vocab_inner(data_dir, vocab_filename, vocab_size,
 def get_or_generate_vocab(data_dir, tmp_dir, vocab_filename, vocab_size,
                           sources, file_byte_budget=1e6):
   """Generate a vocabulary from the datasets in sources."""
-
+  print("get_or_generate_vocab called")
   def generate():
     """Generate lines for vocabulary generation."""
     tf.logging.info("Generating vocab from: %s", str(sources))

@@ -815,3 +815,39 @@ def attention_lm_moe_unscramble_base():
   hparams.layer_preprocess_sequence = "n"
   hparams.layer_postprocess_sequence = "da"
   return hparams
+
+@registry.register_hparams
+def attention_lm_moe_256():
+  hparams = attention_lm_moe_base()
+  hparams.num_hidden_layers = 4
+  hparams.hidden_size = 512
+  hparams.filter_size = 2048
+  hparams.moe_num_experts = 256
+  hparams.moe_layers = "2"
+  hparams.moe_k = 4
+  return hparams
+
+@registry.register_hparams
+def attention_lm_moe_large_256():
+  hparams = attention_lm_moe_base()
+  hparams.num_hidden_layers = 5
+  hparams.moe_layers = "3"
+  hparams.hidden_size = 1024
+  hparams.num_heads = 16
+  hparams.filter_size = 4096
+  hparams.moe_hidden_sizes = "4096"
+  hparams.moe_num_experts = 256
+  hparams.layer_prepostprocess_dropout = 0.2
+  return hparams
+
+@registry.register_hparams
+def attention_lm_moe_imbalance():
+  hparams = attention_lm_moe_base()
+  hparams.num_hidden_layers = 4
+  hparams.hidden_size = 512
+  hparams.filter_size = 2048
+  hparams.moe_num_experts = 256
+  hparams.moe_layers = "2"
+  hparams.moe_k = 2
+  hparams.attention_load_balance = 0
+  return hparams

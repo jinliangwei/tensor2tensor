@@ -477,6 +477,10 @@ def noisy_top_k_gating(x,
     if common_layers.should_generate_summaries():
       tf.summary.histogram("importance", tf.reduce_sum(gates, 0))
       tf.summary.histogram("load", load)
+      gates_load = _gates_to_load(gates)
+      tf.summary.histogram("gates_load", gates_load)
+      gates_shape = tf.shape(gates)
+      tf.summary.image("gates", tf.reshape(gates, [1, gates_shape[0], gates_shape[1], 1]))
     return gates, load
 
 

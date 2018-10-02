@@ -663,6 +663,7 @@ class SubwordTextEncoder(TextEncoder):
     Returns:
       SubwordTextEncoder with `vocab_size` approximately `target_vocab_size`.
     """
+    print("build from generator")
     token_counts = collections.defaultdict(int)
     for item in generator:
       for tok in tokenizer.encode(native_to_unicode(item)):
@@ -800,7 +801,7 @@ class SubwordTextEncoder(TextEncoder):
       min_count = 1
     for i in range(num_iterations):
       tf.logging.info("Iteration {0}".format(i))
-
+      print("Iteration {0}".format(i))
       # Collect all substrings of the encoded token that break along current
       # subtoken boundaries.
       subtoken_counts = collections.defaultdict(int)

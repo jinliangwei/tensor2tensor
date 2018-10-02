@@ -211,6 +211,7 @@ class Text2TextProblem(problem.Problem):
     if self.vocab_type == VocabType.CHARACTER:
       encoder = text_encoder.ByteTextEncoder()
     elif self.vocab_type == VocabType.SUBWORD:
+      print("force_get = ", force_get)
       if force_get:
         vocab_filepath = os.path.join(data_dir, self.vocab_filename)
         encoder = text_encoder.SubwordTextEncoder(vocab_filepath)
@@ -242,7 +243,9 @@ class Text2TextProblem(problem.Problem):
 
   def generate_encoded_samples(self, data_dir, tmp_dir, dataset_split):
     generator = self.generate_samples(data_dir, tmp_dir, dataset_split)
+    print("get_or_create_vocab ", data_dir, tmp_dir)
     encoder = self.get_or_create_vocab(data_dir, tmp_dir)
+    print("get_or_create_vocab done!!!")
     return text2text_generate_encoded(generator, encoder,
                                       has_inputs=self.has_inputs)
 
@@ -576,11 +579,13 @@ def text2text_generate_encoded(sample_generator,
   """Encode Text2Text samples from the generator with the vocab."""
   targets_vocab = targets_vocab or vocab
   for sample in sample_generator:
+    #print("before encode", sample, "len = ", len(sample["inputs"]), len(sample["targets"]))
     if has_inputs:
       sample["inputs"] = vocab.encode(sample["inputs"])
       sample["inputs"].append(text_encoder.EOS_ID)
     sample["targets"] = targets_vocab.encode(sample["targets"])
     sample["targets"].append(text_encoder.EOS_ID)
+    #print("after encode", sample, "len = ", len(sample["inputs"]), len(sample["targets"]))
     yield sample
 
 

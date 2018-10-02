@@ -745,7 +745,7 @@ class Problem(object):
       (features_dict<str name, Tensor feature>, Tensor targets)
     """
     partition_id, num_partitions = self._dataset_partition(mode, config)
-
+    tf.logging.info("input_fn, partition_id = %d, num_partitions = %d" % (partition_id, num_partitions))
     is_training = mode == tf.estimator.ModeKeys.TRAIN
     if config and config.use_tpu:
       num_threads = 64
@@ -753,6 +753,7 @@ class Problem(object):
       num_threads = 4 if is_training else 1
 
     max_length = self.max_length(hparams)
+    tf.logging.info
 
     def tpu_valid_size(example):
       return data_reader.example_valid_size(example, hparams.min_length,
@@ -807,6 +808,7 @@ class Problem(object):
             "Shapes are not fully defined. Assuming batch_size means tokens.")
         batch_size_means_tokens = True
 
+    tf.logging.info("batch size means tokens = %s", str(batch_size_means_tokens))
     # Batching
     if not batch_size_means_tokens:
       # Batch size means examples per datashard.
@@ -831,6 +833,7 @@ class Problem(object):
             tf.contrib.data.padded_batch_and_drop_remainder(
                 batch_size, padded_shapes))
       else:
+        tf.logging.info("input_fn -- batch size means tokens true")
         # On GPU, bucket by length
         dataset = dataset.filter(gpu_valid_size)
         shard_multiplier = config.data_parallelism.n if config else 1
@@ -842,6 +845,7 @@ class Problem(object):
           # Here  batch_size really means examples per datashard.
           batching_scheme["batch_sizes"] = [hparams.batch_size]
           batching_scheme["boundaries"] = []
+
         dataset = data_reader.bucket_by_sequence_length(
             dataset, data_reader.example_length, batching_scheme["boundaries"],
             batching_scheme["batch_sizes"])

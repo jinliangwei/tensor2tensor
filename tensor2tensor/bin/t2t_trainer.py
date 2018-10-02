@@ -20,6 +20,7 @@ from __future__ import print_function
 import contextlib
 import os
 import sys
+
 from tensor2tensor import models  # pylint: disable=unused-import
 from tensor2tensor import problems as problems_lib  # pylint: disable=unused-import
 from tensor2tensor.data_generators import problem  # pylint: disable=unused-import
@@ -30,6 +31,7 @@ from tensor2tensor.utils import flags as t2t_flags  # pylint: disable=unused-imp
 from tensor2tensor.utils import registry
 from tensor2tensor.utils import trainer_lib
 from tensor2tensor.utils import usr_dir
+
 
 import tensorflow as tf
 
@@ -156,25 +158,25 @@ def create_hparams():
 
 def create_experiment_fn(**kwargs):
   return trainer_lib.create_experiment_fn(
-      model_name=FLAGS.model,
-      problem_name=FLAGS.problem,
-      data_dir=os.path.expanduser(FLAGS.data_dir),
-      train_steps=FLAGS.train_steps,
-      eval_steps=FLAGS.eval_steps,
-      min_eval_frequency=FLAGS.local_eval_frequency,
-      schedule=FLAGS.schedule,
-      eval_throttle_seconds=FLAGS.eval_throttle_seconds,
-      export=FLAGS.export_saved_model,
-      decode_hparams=decoding.decode_hparams(FLAGS.decode_hparams),
-      use_tfdbg=FLAGS.tfdbg,
-      use_dbgprofile=FLAGS.dbgprofile,
-      eval_early_stopping_steps=FLAGS.eval_early_stopping_steps,
-      eval_early_stopping_metric=FLAGS.eval_early_stopping_metric,
-      eval_early_stopping_metric_delta=FLAGS.eval_early_stopping_metric_delta,
-      eval_early_stopping_metric_minimize=FLAGS.
-      eval_early_stopping_metric_minimize,
-      use_tpu=FLAGS.use_tpu,
-      **kwargs)
+    model_name=FLAGS.model,
+    problem_name=FLAGS.problem,
+    data_dir=os.path.expanduser(FLAGS.data_dir),
+    train_steps=FLAGS.train_steps,
+    eval_steps=FLAGS.eval_steps,
+    min_eval_frequency=FLAGS.local_eval_frequency,
+    schedule=FLAGS.schedule,
+    eval_throttle_seconds=FLAGS.eval_throttle_seconds,
+    export=FLAGS.export_saved_model,
+    decode_hparams=decoding.decode_hparams(FLAGS.decode_hparams),
+    use_tfdbg=FLAGS.tfdbg,
+    use_dbgprofile=FLAGS.dbgprofile,
+    eval_early_stopping_steps=FLAGS.eval_early_stopping_steps,
+    eval_early_stopping_metric=FLAGS.eval_early_stopping_metric,
+    eval_early_stopping_metric_delta=FLAGS.eval_early_stopping_metric_delta,
+    eval_early_stopping_metric_minimize=FLAGS.
+    eval_early_stopping_metric_minimize,
+    use_tpu=FLAGS.use_tpu,
+    **kwargs)
 
 
 def create_run_config(hp):
@@ -331,7 +333,6 @@ def maybe_cloud_tpu():
       skip_confirmation=FLAGS.cloud_skip_confirmation) as tpu_master:
     FLAGS.master = tpu_master
     yield
-
 
 def main(argv):
   tf.logging.set_verbosity(tf.logging.INFO)

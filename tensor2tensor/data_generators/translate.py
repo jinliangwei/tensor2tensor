@@ -49,6 +49,7 @@ class TranslateProblem(text_problems.Text2TextProblem):
     return self.source_data_files(problem.DatasetSplit.TRAIN)
 
   def generate_samples(self, data_dir, tmp_dir, dataset_split):
+    print("generate_sample called, vocab_type = ", self.vocab_type)
     datasets = self.source_data_files(dataset_split)
     tag = "train" if dataset_split == problem.DatasetSplit.TRAIN else "dev"
     data_path = compile_data(tmp_dir, datasets, "%s-compiled-%s" % (self.name,
@@ -58,7 +59,7 @@ class TranslateProblem(text_problems.Text2TextProblem):
       generator_utils.get_or_generate_vocab(
           data_dir, tmp_dir, self.vocab_filename, self.approx_vocab_size,
           self.vocab_data_files())
-
+      print("get_or_generate_vocab done")
     return text_problems.text2text_txt_iterator(data_path + ".lang1",
                                                 data_path + ".lang2")
 
