@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Data generators for translation data-sets."""
 
 from __future__ import absolute_import
@@ -24,6 +25,7 @@ from tensor2tensor.data_generators import generator_utils
 from tensor2tensor.data_generators import problem
 from tensor2tensor.data_generators import text_encoder
 from tensor2tensor.data_generators import text_problems
+from tensor2tensor.utils import bleu_hook
 
 import tensorflow as tf
 
@@ -54,14 +56,39 @@ class TranslateProblem(text_problems.Text2TextProblem):
     tag = "train" if dataset_split == problem.DatasetSplit.TRAIN else "dev"
     data_path = compile_data(tmp_dir, datasets, "%s-compiled-%s" % (self.name,
                                                                     tag))
-
-    if self.vocab_type == text_problems.VocabType.SUBWORD:
-      generator_utils.get_or_generate_vocab(
-          data_dir, tmp_dir, self.vocab_filename, self.approx_vocab_size,
-          self.vocab_data_files())
-      print("get_or_generate_vocab done")
     return text_problems.text2text_txt_iterator(data_path + ".lang1",
                                                 data_path + ".lang2")
+
+  def generate_text_for_vocab(self, data_dir, tmp_dir):
+    return generator_utils.generate_lines_for_vocab(tmp_dir,
+                                                    self.vocab_data_files())
+
+  @property
+  def decode_hooks(self):
+    return [compute_bleu_summaries]
+
+
+def compute_bleu_summaries(hook_args):
+  """Compute BLEU core summaries using the decoder output.
+
+  Args:
+    hook_args: DecodeHookArgs namedtuple
+  Returns:
+    A list of tf.Summary values if hook_args.hparams contains the
+    reference file and the translated file.
+  """
+  decode_hparams = hook_args.decode_hparams
+
+  if (decode_hparams.decode_reference is None or
+      decode_hparams.decode_to_file is None):
+    return None
+
+  values = []
+  bleu = 100 * bleu_hook.bleu_wrapper(
+      decode_hparams.decode_reference, decode_hparams.decode_to_file)
+  values.append(tf.Summary.Value(tag="BLEU", simple_value=bleu))
+  tf.logging.info("%s: BLEU = %6.2f" % (decode_hparams.decode_to_file, bleu))
+  return values
 
 
 def _preprocess_sgm(line, is_sgm):
@@ -90,6 +117,7 @@ def compile_data(tmp_dir, datasets, filename):
   if tf.gfile.Exists(lang1_fname) and tf.gfile.Exists(lang2_fname):
     tf.logging.info("Skipping compile data, found files:\n%s\n%s", lang1_fname,
                     lang2_fname)
+    return filename
   with tf.gfile.GFile(lang1_fname, mode="w") as lang1_resfile:
     with tf.gfile.GFile(lang2_fname, mode="w") as lang2_resfile:
       for dataset in datasets:

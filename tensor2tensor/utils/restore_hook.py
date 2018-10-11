@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Restore hooks."""
 
 from __future__ import absolute_import
@@ -55,6 +56,6 @@ class RestoreHook(tf.train.SessionRunHook):
                       if name.startswith(self._old_model_scope)}
     self._assignment_map = assignment_map
 
-    tf.logging.info("restoring variables from checkpoint %s"%(
-        self._checkpoint_path))
+    tf.logging.info("restoring %d variables from checkpoint %s"%(
+        len(assignment_map), self._checkpoint_path))
     tf.train.init_from_checkpoint(self._checkpoint_path, self._assignment_map)

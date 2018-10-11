@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Decoding utilities."""
 from __future__ import absolute_import
 from __future__ import division
@@ -20,6 +21,7 @@ from __future__ import print_function
 import collections
 import operator
 import os
+import re
 import time
 
 import numpy as np
@@ -29,6 +31,8 @@ from six.moves import input  # pylint: disable=redefined-builtin
 
 from tensor2tensor.data_generators import problem as problem_lib
 from tensor2tensor.data_generators import text_encoder
+from tensor2tensor.data_generators import text_problems
+from tensor2tensor.utils import registry
 import tensorflow as tf
 
 FLAGS = tf.flags.FLAGS
@@ -46,6 +50,10 @@ def decode_hparams(overrides=""):
       batch_size=0,
       beam_size=4,
       alpha=0.6,
+      eos_penalty=0.0,
+      block_size=0,
+      guess_and_check_top_k=0,
+      guess_and_check_epsilon=-1,
       return_beams=False,
       write_beam_scores=False,
       max_input_size=-1,
@@ -53,10 +61,15 @@ def decode_hparams(overrides=""):
       num_samples=-1,
       delimiter="\n",
       decode_to_file=None,
+      decode_in_memory=False,
       shards=1,
       shard_id=0,
       num_decodes=1,
-      force_decode_length=False)
+      force_decode_length=False,
+      display_decoded_images=False,
+      # Used for video decoding.
+      frames_per_second=10,
+      skip_eos_postprocess=False)
   hp.parse(overrides)
   return hp
 
@@ -91,6 +104,10 @@ def log_decode_results(inputs,
     fix_and_save_video(targets, "targets")
 
   is_image = "image" in problem_name
+  is_text2class = isinstance(registry.problem(problem_name),
+                             text_problems.Text2ClassProblem)
+  skip_eos_postprocess = is_image or is_text2class
+
   decoded_inputs = None
   if is_image and save_images:
     save_path = os.path.join(
@@ -100,7 +117,8 @@ def log_decode_results(inputs,
     if identity_output:
       decoded_inputs = " ".join(map(str, inputs.flatten()))
     else:
-      decoded_inputs = inputs_vocab.decode(_save_until_eos(inputs, is_image))
+      decoded_inputs = inputs_vocab.decode(_save_until_eos(
+          inputs, skip_eos_postprocess))
 
     if log_results and not is_video:
       tf.logging.info("Inference results INPUT: %s" % decoded_inputs)
@@ -112,9 +130,11 @@ def log_decode_results(inputs,
     if targets is not None:
       decoded_targets = " ".join(map(str, targets.flatten()))
   else:
-    decoded_outputs = targets_vocab.decode(_save_until_eos(outputs, is_image))
+    decoded_outputs = targets_vocab.decode(_save_until_eos(
+        outputs, skip_eos_postprocess))
     if targets is not None and log_results:
-      decoded_targets = targets_vocab.decode(_save_until_eos(targets, is_image))
+      decoded_targets = targets_vocab.decode(_save_until_eos(
+          targets, skip_eos_postprocess))
   if not is_video:
     tf.logging.info("Inference results OUTPUT: %s" % decoded_outputs)
   if targets is not None and log_results and not is_video:
@@ -127,7 +147,8 @@ def decode_from_dataset(estimator,
                         hparams,
                         decode_hp,
                         decode_to_file=None,
-                        dataset_split=None):
+                        dataset_split=None,
+                        checkpoint_path=None):
   """Perform decoding from dataset."""
   tf.logging.info("Performing local inference from dataset for %s.",
                   str(problem_name))
@@ -154,28 +175,43 @@ def decode_from_dataset(estimator,
   infer_input_fn = problem.make_estimator_input_fn(
       tf.estimator.ModeKeys.PREDICT, hparams, dataset_kwargs=dataset_kwargs)
 
-  output_dirs = []
+  predictions, output_dirs = [], []
   for decode_id in range(decode_hp.num_decodes):
     tf.logging.info("Decoding {}".format(decode_id))
 
-    output_dir = os.path.join(estimator.model_dir, "decode_%05d" % decode_id)
-    tf.gfile.MakeDirs(output_dir)
-    output_dirs.append(output_dir)
+    # Create decode directory if not in-memory decoding.
+    if not decode_hp.decode_in_memory:
+      output_dir = os.path.join(estimator.model_dir, "decode_%05d" % decode_id)
+      tf.gfile.MakeDirs(output_dir)
+      output_dirs.append(output_dir)
 
-    decode_once(estimator,
-                problem_name,
-                hparams,
-                infer_input_fn,
-                decode_hp,
-                decode_to_file,
-                output_dir)
+    result = decode_once(estimator,
+                         problem_name,
+                         hparams,
+                         infer_input_fn,
+                         decode_hp,
+                         decode_to_file,
+                         output_dir,
+                         log_results=not decode_hp.decode_in_memory,
+                         checkpoint_path=checkpoint_path)
+
+    if decode_hp.decode_in_memory:
+      output_dirs = [output_dir]
+      predictions.append(result)
+
+  if decode_hp.decode_to_file:
+    decode_hp.decode_to_file = _decode_filename(
+        decode_hp.decode_to_file, problem_name, decode_hp)
 
   run_postdecode_hooks(DecodeHookArgs(
       estimator=estimator,
       problem=problem,
       output_dirs=output_dirs,
       hparams=hparams,
-      decode_hparams=decode_hp))
+      decode_hparams=decode_hp,
+      predictions=predictions
+  ), dataset_split)
+  return predictions
 
 
 def decode_once(estimator,
@@ -184,20 +220,22 @@ def decode_once(estimator,
                 infer_input_fn,
                 decode_hp,
                 decode_to_file,
-                output_dir):
+                output_dir,
+                log_results=True,
+                checkpoint_path=None):
   """Decodes once."""
 
   # Get the predictions as an iterable
-  predictions = estimator.predict(infer_input_fn)
+  predictions = estimator.predict(infer_input_fn,
+                                  checkpoint_path=checkpoint_path)
+
+  if not log_results:
+    return list(predictions)
 
   # Prepare output file writers if decode_to_file passed
   decode_to_file = decode_to_file or decode_hp.decode_to_file
   if decode_to_file:
-    if decode_hp.shards > 1:
-      decode_filename = decode_to_file + ("%.2d" % decode_hp.shard_id)
-    else:
-      decode_filename = decode_to_file
-    output_filepath = _decode_filename(decode_filename, problem_name, decode_hp)
+    output_filepath = _decode_filename(decode_to_file, problem_name, decode_hp)
     parts = output_filepath.split(".")
     parts[-1] = "targets"
     target_filepath = ".".join(parts)
@@ -215,6 +253,7 @@ def decode_once(estimator,
   inputs_vocab_key = "inputs" if has_input else "targets"
   inputs_vocab = problem_hparams.vocabulary[inputs_vocab_key]
   targets_vocab = problem_hparams.vocabulary["targets"]
+
   for num_predictions, prediction in enumerate(predictions):
     num_predictions += 1
     inputs = prediction["inputs"]
@@ -265,6 +304,9 @@ def decode_once(estimator,
     # Write out predictions if decode_to_file passed
     if decode_to_file:
       for i, (d_input, d_output, d_target) in enumerate(decoded_outputs):
+        # Skip if all padding
+        if re.match("^({})+$".format(text_encoder.PAD), d_input):
+          continue
         beam_score_str = ""
         if decode_hp.write_beam_scores:
           beam_score_str = "\t%.2f" % decoded_scores[i]
@@ -385,24 +427,54 @@ def decode_from_file(estimator,
   # (except for adding shard_id if using more shards for decoding).
   # Otherwise, use the input filename plus model, hp, problem, beam, alpha.
   decode_filename = decode_to_file if decode_to_file else filename
-  if decode_hp.shards > 1:
-    decode_filename += "%.2d" % decode_hp.shard_id
   if not decode_to_file:
     decode_filename = _decode_filename(decode_filename, problem_name, decode_hp)
   tf.logging.info("Writing decodes into %s" % decode_filename)
   outfile = tf.gfile.Open(decode_filename, "w")
   for index in range(len(sorted_inputs)):
     outfile.write("%s%s" % (decodes[sorted_keys[index]], decode_hp.delimiter))
+  outfile.flush()
+  outfile.close()
+
+  output_dir = os.path.join(estimator.model_dir, "decode")
+  tf.gfile.MakeDirs(output_dir)
+
+  run_postdecode_hooks(DecodeHookArgs(
+      estimator=estimator,
+      problem=hparams.problem,
+      output_dirs=[output_dir],
+      hparams=hparams,
+      decode_hparams=decode_hp,
+      predictions=list(result_iter)
+  ), None)
 
 
 def _decode_filename(base_filename, problem_name, decode_hp):
-  return "{base}.{model}.{hp}.{problem}.beam{beam}.alpha{alpha}.decodes".format(
-      base=base_filename,
-      model=FLAGS.model,
-      hp=FLAGS.hparams_set,
-      problem=problem_name,
-      beam=str(decode_hp.beam_size),
-      alpha=str(decode_hp.alpha))
+  """Generates decode filename.
+
+  Args:
+    base_filename: A string, base of the decode filename.
+    problem_name: A string, name of the problem.
+    decode_hp: HParams for decoding.
+
+  Returns:
+    A string, produced decode filename.
+  """
+  if decode_hp.shards > 1:
+    base_filename = base_filename + ("%.2d" % decode_hp.shard_id)
+  if ("beam{beam}.alpha{alpha}.decodes".format(
+      beam=str(decode_hp.beam_size), alpha=str(decode_hp.alpha))
+      in base_filename):
+    return base_filename
+  else:
+    return (
+        "{base}.{model}.{hp}.{problem}.beam{beam}.alpha{alpha}.decodes".format(
+            base=base_filename,
+            model=FLAGS.model,
+            hp=FLAGS.hparams_set,
+            problem=problem_name,
+            beam=str(decode_hp.beam_size),
+            alpha=str(decode_hp.alpha)))
 
 
 def make_input_fn_from_generator(gen):
@@ -432,6 +504,12 @@ def make_input_fn_from_generator(gen):
 def decode_interactively(estimator, hparams, decode_hp, checkpoint_path=None):
   """Interactive decoding."""
 
+  is_image = "image" in hparams.problem.name
+  is_text2class = isinstance(hparams.problem,
+                             text_problems.Text2ClassProblem)
+  skip_eos_postprocess = (
+      is_image or is_text2class or decode_hp.skip_eos_postprocess)
+
   def input_fn():
     gen_fn = make_input_fn_from_generator(
         _interactive_input_fn(hparams, decode_hp))
@@ -441,7 +519,6 @@ def decode_interactively(estimator, hparams, decode_hp, checkpoint_path=None):
 
   result_iter = estimator.predict(input_fn, checkpoint_path=checkpoint_path)
   for result in result_iter:
-    is_image = False  # TODO(lukaszkaiser): find out from problem id / class.
     targets_vocab = hparams.problem_hparams.vocabulary["targets"]
 
     if decode_hp.return_beams:
@@ -451,7 +528,8 @@ def decode_interactively(estimator, hparams, decode_hp, checkpoint_path=None):
         scores = np.split(result["scores"], decode_hp.beam_size, axis=0)
       for k, beam in enumerate(beams):
         tf.logging.info("BEAM %d:" % k)
-        beam_string = targets_vocab.decode(_save_until_eos(beam, is_image))
+        beam_string = targets_vocab.decode(_save_until_eos(
+            beam, skip_eos_postprocess))
         if scores is not None:
           tf.logging.info("\"%s\"\tScore:%f" % (beam_string, scores[k]))
         else:
@@ -461,7 +539,8 @@ def decode_interactively(estimator, hparams, decode_hp, checkpoint_path=None):
         tf.logging.info(" ".join(map(str, result["outputs"].flatten())))
       else:
         tf.logging.info(
-            targets_vocab.decode(_save_until_eos(result["outputs"], is_image)))
+            targets_vocab.decode(_save_until_eos(
+                result["outputs"], skip_eos_postprocess)))
 
 
 def _decode_batch_input_fn(num_decode_batches, sorted_inputs, vocabulary,
@@ -645,17 +724,17 @@ def _get_sorted_inputs(filename, num_shards=1, delimiter="\n"):
   return sorted_inputs, sorted_keys
 
 
-def _save_until_eos(hyp, is_image):
+def _save_until_eos(ids, skip=False):
   """Strips everything after the first <EOS> token, which is normally 1."""
-  hyp = hyp.flatten()
-  if is_image:
-    return hyp
+  ids = ids.flatten()
+  if skip:
+    return ids
   try:
-    index = list(hyp).index(text_encoder.EOS_ID)
-    return hyp[0:index]
+    index = list(ids).index(text_encoder.EOS_ID)
+    return ids[0:index]
   except ValueError:
     # No EOS_ID: return the array as-is.
-    return hyp
+    return ids
 
 
 def _interactive_input_tensor_to_features_dict(feature_map, hparams):
@@ -740,11 +819,12 @@ def latest_checkpoint_step(ckpt_dir):
 
 class DecodeHookArgs(collections.namedtuple(
     "DecodeHookArgs",
-    ["estimator", "problem", "output_dirs", "hparams", "decode_hparams"])):
+    ["estimator", "problem", "output_dirs", "hparams",
+     "decode_hparams", "predictions"])):
   pass
 
 
-def run_postdecode_hooks(decode_hook_args):
+def run_postdecode_hooks(decode_hook_args, dataset_split):
   """Run hooks after decodes have run."""
   hooks = decode_hook_args.problem.decode_hooks
   if not hooks:
@@ -756,8 +836,12 @@ def run_postdecode_hooks(decode_hook_args):
     return
   tf.logging.info("Running decode hooks.")
   parent_dir = os.path.join(decode_hook_args.output_dirs[0], os.pardir)
-  final_dir = os.path.join(parent_dir, "decode")
+  child_dir = "decode"
+  if dataset_split is not None:
+    child_dir += "_{}".format(dataset_split)
+  final_dir = os.path.join(parent_dir, child_dir)
   summary_writer = tf.summary.FileWriter(final_dir)
+
   for hook in hooks:
     # Isolate each hook in case it creates TF ops
     with tf.Graph().as_default():

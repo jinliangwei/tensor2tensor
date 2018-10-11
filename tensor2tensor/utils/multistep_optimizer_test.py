@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Multi-step Optimizer Test Module for TensorFlow."""
 from __future__ import absolute_import
 from __future__ import division
@@ -25,11 +26,6 @@ import tensorflow as tf
 class MultistepAdamOptimizerTest(tf.test.TestCase):
 
   def testMultistep(self):
-    ver = tf.__version__.split('.')
-    # TODO(rsepassi): Remove version check once 1.5 is not tested anymore
-    if int(ver[0]) <= 1 and int(ver[1]) < 6:
-      # MultistepAdamOptimizer requires TF >= 1.6
-      return
     dtype = tf.float32
     beta1 = 0.2
     beta2 = 0.99

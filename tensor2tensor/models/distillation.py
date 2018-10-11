@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Traditional Student-Teacher Distillation."""
 
 from __future__ import absolute_import
@@ -28,7 +29,7 @@ import tensorflow as tf
 class Distillation(t2t_model.T2TModel):
   """Distillation from a teacher to student network.
 
-  First, a teacher is train on a task; Second, a student is trained to perform
+  First, a teacher is trained on a task; Second, a student is trained to perform
   the task while matching the teacher's softened outputs. For more details, see
   the paper below.
 

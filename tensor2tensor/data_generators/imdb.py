@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """IMDB Sentiment Classification Problem."""
 
 from __future__ import absolute_import
@@ -46,10 +47,6 @@ class SentimentIMDB(text_problems.Text2ClassProblem):
         "split": problem.DatasetSplit.EVAL,
         "shards": 1,
     }]
-
-  @property
-  def vocab_filename(self):
-    return "sentiment_imdb.vocab.%d" % self.approx_vocab_size
 
   @property
   def approx_vocab_size(self):
@@ -105,6 +102,5 @@ class SentimentIMDBCharacters(SentimentIMDB):
   def vocab_type(self):
     return text_problems.VocabType.CHARACTER
 
-  @property
-  def task_id(self):
-    return problem.SpaceID.EN_CHR_SENT
+  def global_task_id(self):
+    return problem.TaskID.EN_CHR_SENT

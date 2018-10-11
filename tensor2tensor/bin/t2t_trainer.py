@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Train and evaluate."""
 from __future__ import absolute_import
 from __future__ import division
@@ -25,15 +26,15 @@ from tensor2tensor import models  # pylint: disable=unused-import
 from tensor2tensor import problems as problems_lib  # pylint: disable=unused-import
 from tensor2tensor.data_generators import problem  # pylint: disable=unused-import
 from tensor2tensor.utils import cloud_mlengine
-from tensor2tensor.utils import cloud_tpu
 from tensor2tensor.utils import decoding
 from tensor2tensor.utils import flags as t2t_flags  # pylint: disable=unused-import
 from tensor2tensor.utils import registry
 from tensor2tensor.utils import trainer_lib
 from tensor2tensor.utils import usr_dir
 
-
 import tensorflow as tf
+
+from tensorflow.contrib.tpu.python.tpu import tpu_config
 
 flags = tf.flags
 FLAGS = flags.FLAGS
@@ -50,6 +51,9 @@ flags.DEFINE_integer("tpu_num_shards", 8, "Number of tpu shards.")
 flags.DEFINE_integer("iterations_per_loop", 100,
                      "Number of iterations in a TPU training loop.")
 flags.DEFINE_bool("use_tpu", False, "Whether to use TPU.")
+flags.DEFINE_bool("use_tpu_estimator", False, "Whether to use TPUEstimator. "
+                  "This is always enabled when use_tpu is True.")
+flags.DEFINE_bool("xla_compile", False, "Whether to use XLA to compile graph.")
 flags.DEFINE_integer("tpu_infeed_sleep_secs", None,
                      "How long to sleep the infeed thread.")
 flags.DEFINE_bool("generate_data", False, "Generate data before training?")
@@ -78,16 +82,12 @@ try:
 except:  # pylint: disable=bare-except
   pass
 
+flags.DEFINE_string("std_server_protocol", "grpc",
+                    "Protocol for tf.train.Server.")
+
 # Google Cloud TPUs
-flags.DEFINE_bool("cloud_tpu", False, "Whether to launch on Cloud TPUs.")
-flags.DEFINE_string("cloud_vm_name", "%s-vm" % os.getenv("USER"),
-                    "Name of Cloud VM to use or create.")
 flags.DEFINE_string("cloud_tpu_name", "%s-tpu" % os.getenv("USER"),
                     "Name of Cloud TPU instance to use or create.")
-flags.DEFINE_bool("cloud_delete_on_done", False,
-                  "Whether to delete the VM and TPU instance when done.")
-flags.DEFINE_bool("cloud_skip_confirmation", False,
-                  "Whether to skip launch confirmations.")
 
 # Google Cloud ML Engine
 flags.DEFINE_bool("cloud_mlengine", False,
@@ -149,41 +149,48 @@ def set_hparams_from_args(args):
 
 
 def create_hparams():
-  if (FLAGS.cloud_tpu or FLAGS.use_tpu) and "tpu" not in FLAGS.hparams_set:
+  if FLAGS.use_tpu and "tpu" not in FLAGS.hparams_set:
     tf.logging.warn("Not all hyperparameter sets work on TPU. "
                     "Prefer hparams_sets with a '_tpu' suffix, "
                     "e.g. transformer_tpu, if available for your model.")
   return trainer_lib.create_hparams(FLAGS.hparams_set, FLAGS.hparams)
 
 
-def create_experiment_fn(**kwargs):
+def create_experiment_fn():
   return trainer_lib.create_experiment_fn(
-    model_name=FLAGS.model,
-    problem_name=FLAGS.problem,
-    data_dir=os.path.expanduser(FLAGS.data_dir),
-    train_steps=FLAGS.train_steps,
-    eval_steps=FLAGS.eval_steps,
-    min_eval_frequency=FLAGS.local_eval_frequency,
-    schedule=FLAGS.schedule,
-    eval_throttle_seconds=FLAGS.eval_throttle_seconds,
-    export=FLAGS.export_saved_model,
-    decode_hparams=decoding.decode_hparams(FLAGS.decode_hparams),
-    use_tfdbg=FLAGS.tfdbg,
-    use_dbgprofile=FLAGS.dbgprofile,
-    eval_early_stopping_steps=FLAGS.eval_early_stopping_steps,
-    eval_early_stopping_metric=FLAGS.eval_early_stopping_metric,
-    eval_early_stopping_metric_delta=FLAGS.eval_early_stopping_metric_delta,
-    eval_early_stopping_metric_minimize=FLAGS.
-    eval_early_stopping_metric_minimize,
-    use_tpu=FLAGS.use_tpu,
-    **kwargs)
+      model_name=FLAGS.model,
+      problem_name=FLAGS.problem,
+      data_dir=os.path.expanduser(FLAGS.data_dir),
+      train_steps=FLAGS.train_steps,
+      eval_steps=FLAGS.eval_steps,
+      min_eval_frequency=FLAGS.local_eval_frequency,
+      schedule=FLAGS.schedule,
+      eval_throttle_seconds=FLAGS.eval_throttle_seconds,
+      export=FLAGS.export_saved_model,
+      decode_hparams=decoding.decode_hparams(FLAGS.decode_hparams),
+      use_tfdbg=FLAGS.tfdbg,
+      use_dbgprofile=FLAGS.dbgprofile,
+      eval_early_stopping_steps=FLAGS.eval_early_stopping_steps,
+      eval_early_stopping_metric=FLAGS.eval_early_stopping_metric,
+      eval_early_stopping_metric_delta=FLAGS.eval_early_stopping_metric_delta,
+      eval_early_stopping_metric_minimize=FLAGS
+      .eval_early_stopping_metric_minimize,
+      use_tpu=FLAGS.use_tpu,
+      use_tpu_estimator=FLAGS.use_tpu_estimator,
+      use_xla=FLAGS.xla_compile,
+      warm_start_from=FLAGS.warm_start_from,
+      decode_from_file=FLAGS.decode_from_file,
+      decode_to_file=FLAGS.decode_to_file,
+      decode_reference=FLAGS.decode_reference,
+      std_server_protocol=FLAGS.std_server_protocol)
 
-
-def create_run_config(hp):
+def create_run_config(hp, output_dir=None):
   """Create a run config.
 
   Args:
     hp: model hyperparameters
+    output_dir: model's output directory, defaults to output_dir flag.
+
   Returns:
     a run config
   """
@@ -194,6 +201,14 @@ def create_run_config(hp):
   assert FLAGS.output_dir or FLAGS.checkpoint_path
   tpu_config_extra_kwargs = {}
 
+  if getattr(hp, "mtf_mode", False):
+    save_ckpt_steps = None  # Disable the default saver
+    save_ckpt_secs = None  # Disable the default saver
+    tpu_config_extra_kwargs = {
+        "num_cores_per_replica": 1,
+        "per_host_input_for_training": tpu_config.InputPipelineConfig.BROADCAST,
+    }
+
   # the various custom getters we have written do not play well together yet.
   # TODO(noam): ask rsepassi for help here.
   daisy_chain_variables = (
@@ -201,7 +216,7 @@ def create_run_config(hp):
       hp.activation_dtype == "float32" and
       hp.weight_dtype == "float32")
   return trainer_lib.create_run_config(
-      model_dir=os.path.expanduser(FLAGS.output_dir),
+      model_dir=output_dir or os.path.expanduser(FLAGS.output_dir),
       master=FLAGS.master,
       iterations_per_loop=FLAGS.iterations_per_loop,
       num_shards=FLAGS.tpu_num_shards,
@@ -217,6 +232,7 @@ def create_run_config(hp):
       gpu_mem_fraction=FLAGS.worker_gpu_memory_fraction,
       enable_graph_rewriter=FLAGS.enable_graph_rewriter,
       use_tpu=FLAGS.use_tpu,
+      use_tpu_estimator=FLAGS.use_tpu_estimator,
       schedule=FLAGS.schedule,
       no_data_parallelism=hp.no_data_parallelism,
       daisy_chain_variables=daisy_chain_variables,
@@ -231,7 +247,8 @@ def create_run_config(hp):
       inter_op_parallelism_threads=FLAGS.inter_op_parallelism_threads,
       log_step_count_steps=FLAGS.log_step_count_steps,
       intra_op_parallelism_threads=FLAGS.intra_op_parallelism_threads,
-      tpu_config_extra_kwargs=tpu_config_extra_kwargs)
+      tpu_config_extra_kwargs=tpu_config_extra_kwargs,
+      cloud_tpu_name=FLAGS.cloud_tpu_name)
 
 
 def generate_data():
@@ -311,35 +328,17 @@ def execute_schedule(exp):
     getattr(exp, FLAGS.schedule)()
 
 
-@contextlib.contextmanager
-def maybe_cloud_tpu():
-  """If FLAGS.cloud_tpu is set, setup Cloud instances."""
-  if not FLAGS.cloud_tpu:
-    yield
-    return
-
-  tf.logging.info("Running on Cloud TPU")
-
-  if (not FLAGS.data_dir.startswith("gs://") or
-      not FLAGS.output_dir.startswith("gs://")):
-    raise ValueError("To run on Cloud TPUs, data_dir and output_dir need to "
-                     "be gs:// paths, i.e. on Google Cloud Storage.")
-
-  FLAGS.use_tpu = True
-  with cloud_tpu.cloud_tpu(
-      FLAGS.cloud_vm_name,
-      FLAGS.cloud_tpu_name,
-      delete_on_done=FLAGS.cloud_delete_on_done,
-      skip_confirmation=FLAGS.cloud_skip_confirmation) as tpu_master:
-    FLAGS.master = tpu_master
-    yield
+def run_std_server():
+  exp = trainer_lib.T2TExperiment(*([None] * 5))
+  exp.run_std_server()
 
 def main(argv):
   tf.logging.set_verbosity(tf.logging.INFO)
+  if FLAGS.schedule == "run_std_server":
+    run_std_server()
   trainer_lib.set_random_seed(FLAGS.random_seed)
   usr_dir.import_usr_dir(FLAGS.t2t_usr_dir)
   maybe_log_registry_and_exit()
-
 
   if FLAGS.cloud_mlengine:
     cloud_mlengine.launch()
@@ -355,13 +354,13 @@ def main(argv):
     set_hparams_from_args(argv[1:])
   hparams = create_hparams()
 
-  with maybe_cloud_tpu():
-    exp_fn = create_experiment_fn()
-    exp = exp_fn(create_run_config(hparams), hparams)
-    if is_chief():
-      save_metadata(hparams)
-    execute_schedule(exp)
+  exp_fn = create_experiment_fn()
+  exp = exp_fn(create_run_config(hparams), hparams)
+  if is_chief():
+    save_metadata(hparams)
+  execute_schedule(exp)
 
 
 if __name__ == "__main__":
+  tf.logging.set_verbosity(tf.logging.INFO)
   tf.app.run()

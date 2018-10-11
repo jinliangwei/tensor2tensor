@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Optimization."""
 from __future__ import absolute_import
 from __future__ import division
@@ -33,6 +34,8 @@ def optimize(loss, learning_rate, hparams, use_tpu=False):
   loss = weight_decay_and_noise(loss, hparams, learning_rate)
   loss = tf.identity(loss, name="total_loss")
   log_variable_sizes(verbose=hparams.summarize_vars)
+  if hparams.summarize_vars:
+    summarize_variables()
   diet_vars = [
       v for v in tf.global_variables() if v.dtype == dtypes.float16_ref
   ]
@@ -42,11 +45,14 @@ def optimize(loss, learning_rate, hparams, use_tpu=False):
   if use_tpu:
     opt = tf.contrib.tpu.CrossShardOptimizer(opt)
 
-  tf.summary.scalar("learning_rate", learning_rate)
-  opt_summaries = ["loss"]
-  if hparams.summarize_grads:
-    tf.logging.info("Summarizing gradients")
-    opt_summaries.extend(["gradients", "gradient_norm", "global_gradient_norm"])
+  opt_summaries = []
+  if common_layers.should_generate_summaries():
+    tf.summary.scalar("learning_rate", learning_rate)
+    opt_summaries.append("loss")
+    if hparams.summarize_grads:
+      tf.logging.info("Summarizing gradients")
+      opt_summaries.extend(
+          ["gradients", "gradient_norm", "global_gradient_norm"])
 
   if hparams.clip_grad_norm:
     tf.logging.info("Clipping gradients, norm: %0.5f", hparams.clip_grad_norm)
@@ -71,14 +77,10 @@ class ConditionalOptimizer(tf.train.Optimizer):
   """Conditional optimizer."""
 
   def __init__(self, optimizer_name, lr, hparams, use_tpu=False):  # pylint: disable=super-init-not-called
-    if optimizer_name == "Adam" and use_tpu:
-      # LazyAdamOptimizer does not work on TPU
-      optimizer_name = "TrueAdam"
-
     tf.logging.info("Using optimizer %s", optimizer_name)
 
     if optimizer_name == "Adam":
-      # We change the default epsilon for Adam and re-scale lr.
+      # We change the default epsilon for Adam.
       # Using LazyAdam as it's much faster for large vocabulary embeddings.
       self._opt = tf.contrib.opt.LazyAdamOptimizer(
           lr,
@@ -134,7 +136,7 @@ def weight_decay_and_noise(loss, hparams, learning_rate, var_list=None):
   noise_vars = [v for v in var_list if "/body/" in v.name]
 
   weight_decay_loss = weight_decay(hparams.weight_decay, decay_vars)
-  if hparams.weight_decay:
+  if hparams.weight_decay and common_layers.should_generate_summaries():
     tf.summary.scalar("losses/weight_decay", weight_decay_loss)
   weight_noise_ops = weight_noise(hparams.weight_noise, learning_rate,
                                   noise_vars)
@@ -159,7 +161,8 @@ def weight_noise(noise_rate, learning_rate, var_list):
   for v in var_list:
     with tf.device(v._ref().device):  # pylint: disable=protected-access
       scale = noise_rate * learning_rate * 0.001
-      tf.summary.scalar("weight_noise_scale", scale)
+      if common_layers.should_generate_summaries():
+        tf.summary.scalar("weight_noise_scale", scale)
       noise = tf.truncated_normal(v.shape) * scale
       noise_op = v.assign_add(noise)
       noise_ops.append(noise_op)
@@ -216,6 +219,24 @@ def log_variable_sizes(var_list=None, tag=None, verbose=False):
   tf.logging.info("%s Total size: %d", tag, total_size)
 
 
+def summarize_variables(var_list=None, tag=None):
+  """Summarize the variables.
+
+  Args:
+    var_list: a list of variables; defaults to trainable_variables.
+    tag: name scope of the summary; defaults to training_variables/.
+  """
+  if var_list is None:
+    var_list = tf.trainable_variables()
+  if tag is None:
+    tag = "training_variables/"
+
+  name_to_var = {v.name: v for v in var_list}
+  for v_name in list(name_to_var):
+    v = name_to_var[v_name]
+    tf.summary.histogram(tag + v_name, v)
+
+
 def get_variable_initializer(hparams):
   """Get variable initializer from hparams."""
   if not hparams.initializer:
@@ -234,5 +255,7 @@ def get_variable_initializer(hparams):
   elif hparams.initializer == "uniform_unit_scaling":
     return tf.variance_scaling_initializer(
         hparams.initializer_gain, mode="fan_avg", distribution="uniform")
+  elif hparams.initializer == "xavier":
+    return tf.contrib.layers.xavier_initializer()
   else:
     raise ValueError("Unrecognized initializer: %s" % hparams.initializer)
