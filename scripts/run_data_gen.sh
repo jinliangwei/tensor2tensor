@@ -1,7 +1,7 @@
 #!/bin/bash
-PROBLEM=translate_ende_wmt32k
+PROBLEM=languagemodel_lm1b32k
 TMP_DIR=/datasets/BigLearning/aqiao/tmp
-DATA_DIR=/datasets/BigLearning/aqiao/translate_ende_wmt32k_test
+DATA_DIR=/datasets/BigLearning/aqiao/languagemodel_lm1b32k
 
 #PROBLEM=image_mnist
 #DATA_DIR=/datasets/BigLearning/aqiao/image_mnist

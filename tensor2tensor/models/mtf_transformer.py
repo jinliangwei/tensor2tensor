@@ -759,7 +759,7 @@ def mtf_transformer_tiny():
   hparams.decoder_layers = ["att", "enc_att", "drd"] * 2
   hparams.num_heads = 8
   # data parallelism and model-parallelism
-  hparams.mesh_shape = "batch:2;model:4"
+  hparams.mesh_shape = "batch:1;model:2"
   hparams.activation_dtype = "float32"
   return hparams
 
