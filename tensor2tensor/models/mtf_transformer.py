@@ -775,6 +775,16 @@ def mtf_transformer_tiny_lm():
 
 
 @registry.register_hparams
+def mtf_transformer_tiny_lm_moe():
+  hparams = mtf_transformer_tiny_lm()
+  hparams.encoder_layers = ["att", "moe"] * 2
+  hparams.decoder_layers = hparams.encoder_layers
+  hparams.layout += ";experts:model"
+  moe.set_default_moe_hparams(hparams)
+  return hparams
+
+
+@registry.register_hparams
 def mtf_transformer_single():
   hparams = mtf_transformer_tiny()
   hparams.mesh_shape = ""

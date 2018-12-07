@@ -4,7 +4,7 @@ TMP_DIR=/datasets/BigLearning/aqiao/tmp
 DATA_DIR=/datasets/BigLearning/aqiao/languagemodel_lm1b8k_packed
 
 MODEL=mtf_transformer
-HPARAMS=mtf_transformer_tiny_lm
+HPARAMS=mtf_transformer_tiny_lm_moe
 TRAIN_STEPS=4000
 MESH_SHAPE="batch:1;model:2"
 

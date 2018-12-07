@@ -5,7 +5,7 @@ DATA_DIR=/datasets/BigLearning/aqiao/languagemodel_lm1b8k_packed
 MESH_SHAPE="batch:1;model:2"
 
 MODEL=mtf_transformer
-HPARAMS=mtf_transformer_tiny_lm
+HPARAMS=mtf_transformer_tiny_lm_moe
 TRAIN_STEPS=4000
 
 TRAIN_DIR=/proj/BigLearning/aqiao/t2t_train_single/$PROBLEM/$MODEL-$HPARAMS
