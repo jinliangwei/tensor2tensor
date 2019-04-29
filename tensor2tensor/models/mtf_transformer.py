@@ -782,9 +782,7 @@ def mtf_transformer_tiny_lm_moe():
   # On 2x TITAN X GPUs:
   #   With "experts:model", runs at 850 experts and fails at 900 experts
   #   Without "experts:model", runs at 400 experts and fails at 450 experts
-  hparams.layout += ";experts:model"
   moe.set_default_moe_hparams(hparams)
-  hparams.moe_num_experts = 400
   return hparams
 
 

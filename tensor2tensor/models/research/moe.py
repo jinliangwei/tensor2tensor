@@ -42,7 +42,6 @@ def transformer_moe_layer_v1(inputs, output_dim, hparams, train,
   Hyperparameters used:
     hparams.moe_num_experts: number of experts
     hparams.moe_hidden_size: size of hidden layer in each expert
-    hparams.moe_group_size: size of each "group" for gating purposes
     hparams.moe_capacity_factor_train: a float
     hparams.moe_capacity_factor_eval: a float
     hparams.moe_gating: a string
@@ -68,16 +67,6 @@ def transformer_moe_layer_v1(inputs, output_dim, hparams, train,
   Without the loss, it is very likely that a few experts will be trained and
   the rest will starve.
 
-  Several hacks are necessary to get around current TPU limitations:
-
-  - To ensure static shapes, we enforce (by truncation/padding)
-    that each sequence send the same number of elements to each expert.
-
-    It would make more sense to enforce this equality over the entire batch,
-    but due to our hacked-up gather-by-matmul implementation, we need to divide
-    the batch into "groups".  For each group, the same number of elements
-    are sent to each expert.
-
   TODO(noam): Factor this code better.  We want to be able to substitute
   different code for the experts themselves.
 
@@ -100,41 +89,44 @@ def transformer_moe_layer_v1(inputs, output_dim, hparams, train,
   input_dim = inputs.shape.dims[-1]
   hidden_dim = mtf.Dimension("expert_hidden", hparams.moe_hidden_size)
   experts_dim = mtf.Dimension("experts", hparams.moe_num_experts)
-  group_size_dim = mtf.Dimension("group", hparams.moe_group_size)
   batch_dim = mtf.Dimension(
       orig_inputs.shape[0].name,
-      orig_inputs.shape.size // (group_size_dim.size * input_dim.size))
-  inputs = mtf.reshape(inputs, [batch_dim, group_size_dim, input_dim])
+      orig_inputs.shape.size // input_dim.size)
+  inputs = mtf.reshape(inputs, [batch_dim, input_dim])
 
   # Each sequence sends expert_capacity positions to each expert.
-  capacity_factor = (
-      hparams.moe_capacity_factor_train if train else
-      hparams.moe_capacity_factor_eval)
-  expert_capacity = min(
-      group_size_dim.size,
-      int((group_size_dim.size * capacity_factor) / experts_dim.size))
-  expert_capacity_dim = mtf.Dimension("expert_capacity", expert_capacity)
+  top_k_dim = mtf.Dimension("top_k", 2)
 
   experts_dim_unsplit = mtf.Dimension("expert_unsplit", experts_dim.size)
   batch_dim_unsplit = mtf.Dimension("batch_unsplit", batch_dim.size)
 
   if hparams.moe_gating == "top_2":
-    dispatch_tensor, combine_tensor, loss = _top_2_gating(
+    # dispatch_tensor, combine_tensor, loss = _top_2_gating(
+    #     inputs=inputs,
+    #     outer_expert_dims=None,
+    #     experts_dim=experts_dim_unsplit,
+    #     expert_capacity_dim=expert_capacity_dim,
+    #     hparams=hparams,
+    #     train=train)
+    dispatch_tensor, combine_tensor, loss = _top_k_gating(
         inputs=inputs,
-        outer_expert_dims=None,
         experts_dim=experts_dim_unsplit,
-        expert_capacity_dim=expert_capacity_dim,
+        top_k_dim=top_k_dim,
         hparams=hparams,
         train=train)
   else:
     raise ValueError("unknown hparams.moe_gating=%s" % hparams.moe_gating)
 
   # put num_experts dimension first to make split easier in alltoall
+  # expert_inputs = mtf.einsum([inputs, dispatch_tensor], mtf.Shape(
+  #     [experts_dim_unsplit, batch_dim, expert_capacity_dim, input_dim]))
   expert_inputs = mtf.einsum([inputs, dispatch_tensor], mtf.Shape(
-      [experts_dim_unsplit, batch_dim, expert_capacity_dim, input_dim]))
+      [experts_dim_unsplit, batch_dim, top_k_dim, input_dim]))
 
+  # expert_inputs = mtf.reshape(expert_inputs, mtf.Shape(
+  #     [experts_dim, batch_dim_unsplit, expert_capacity_dim, input_dim]))
   expert_inputs = mtf.reshape(expert_inputs, mtf.Shape(
-      [experts_dim, batch_dim_unsplit, expert_capacity_dim, input_dim]))
+      [experts_dim, batch_dim_unsplit, top_k_dim, input_dim]))
 
   # Now feed the expert inputs through the experts.
   h = mtf.layers.dense(
@@ -145,11 +137,13 @@ def transformer_moe_layer_v1(inputs, output_dim, hparams, train,
       h, output_dim, expert_dims=[experts_dim], use_bias=False,
       master_dtype=master_dtype, slice_dtype=slice_dtype, name="x1")
 
+  # expert_output = mtf.reshape(expert_output, mtf.Shape(
+  #     [experts_dim_unsplit, batch_dim, expert_capacity_dim, input_dim]))
   expert_output = mtf.reshape(expert_output, mtf.Shape(
-      [experts_dim_unsplit, batch_dim, expert_capacity_dim, input_dim]))
+      [experts_dim_unsplit, batch_dim, top_k_dim, input_dim]))
 
   output = mtf.einsum([expert_output, combine_tensor], mtf.Shape(
-      [batch_dim, group_size_dim, output_dim]))
+      [batch_dim, output_dim]))
 
   output = mtf.reshape(output, orig_inputs.shape.dims[:-1] + [output_dim])
 
@@ -534,6 +528,8 @@ def _top_2_gating(
     loss_2 = (mtf.reduce_mean(density_2_proxy * density_2)
               * float(experts_dim.size * experts_dim.size))
     loss += loss_2 * 0.5
+ 
+  #loss = loss * 0.0  # remove balancing loss
 
   # Depending on the policy in the hparams, we may drop out some of the
   # second-place experts.
@@ -592,6 +588,10 @@ def _top_2_gating(
   position_in_expert_2 = mtf.reduce_sum(
       position_in_expert_2, reduced_dim=experts_dim)
 
+  # TODO(aurick): change to return two tensors:
+  # Index tensor [batch, group, k] maps each sample -> top k expert indices
+  # Weight tensor [batch, group, k] maps each sample -> top k expert weights
+
   # [batch, group, experts, expert_capacity]
   combine_tensor = (
       gate_1 * mask_1_flat
@@ -615,6 +615,172 @@ def _top_2_gating(
            mtf.import_tf_tensor(dispatch_tensor.mesh, 0.0),
            mtf.import_tf_tensor(dispatch_tensor.mesh, 1.0)]))],
       "active_experts")
+
+  dispatch_tensor = mtf.Print(
+      dispatch_tensor,
+      [mtf.reduce_max(
+           mtf.reduce_sum(dispatch_tensor, output_shape=[experts_dim]))],
+      "max_inputs")
+
+  return dispatch_tensor, combine_tensor, loss
+
+
+def _top_k_gating(inputs, experts_dim, top_k_dim, hparams, train):
+  """Compute gating for mixture-of-experts in TensorFlow.
+
+  Note: until the algorithm and inferface solidify, we pass in a hyperparameters
+  dictionary in order not to complicate the interface in mtf_transformer.py .
+  Once this code moves out of "research", we should pass the hyperparameters
+  separately.
+
+  Hyperparameters used:
+    hparams.moe_use_second_place_loss: a boolean
+    hparams.moe_second_policy_train: a string
+    hparams.moe_second_policy_eval: a string
+    hparams.moe_second_threshold: a float
+
+  The returned forward assignment is a tensor used to map (via einsum) from the
+  inputs to the expert_inputs.  Likewise, the returned combine_tensor is
+  used to map (via einsum) from the expert outputs to the outputs.  Both the
+  forward and backward assignments are mostly zeros.  The shapes of the tensors
+  are as follows.
+
+  inputs: [<batch_dims>, input_dim]
+  dispatch_tensor:
+    [<batch_dims>, experts_dim, top_k_dim]
+  expert_inputs:
+    [<batch_dims>, experts_dim, top_k_dim, input_dim]
+
+  expert_outputs: [<batch_dims>, experts_dim, top_k_dim, output_dim]
+  combine_tensor:
+    [<batch_dims>, experts_dim, top_k_dim]
+  outputs: [<batch_dims>, output_dim]
+
+  Args:
+    inputs: a mtf.Tensor with shape [<batch_dims>, input_dim]
+    experts_dim: a Dimension (the number of experts)
+    top_k_dim: a Dimension (the "k" in top-k geting)
+    hparams: model hyperparameters.
+    train: a boolean
+
+  Returns:
+    dispatch_tensor: a Tensor with shape
+      [<batch_dims>, experts_dim, expert_capacity_dim]
+    combine_tensor: a Tensor with shape
+      [<batch_dims>, experts_dim, expert_capacity_dim]
+    loss: a mtf scalar
+
+  Raises:
+    ValueError: on illegal hyperparameters
+  """
+  raw_gates = mtf.softmax(mtf.layers.dense(
+      inputs, experts_dim, use_bias=False), experts_dim)
+
+  # The internals of this function run in float32.
+  #   bfloat16 seems to reduce quality.
+  raw_gates = mtf.to_float(raw_gates)
+
+  # FIND TOP 2 EXPERTS PER POSITON
+  # Find the top expert for each position. shape=[batch]
+  index_1, gate_1 = mtf.top_1(raw_gates, experts_dim)
+  # [batch, experts]
+  mask_1 = mtf.one_hot(index_1, experts_dim, dtype=raw_gates.dtype)
+  gates_without_top_1 = raw_gates * (1.0 - mask_1)
+  # [batch]
+  index_2, gate_2 = mtf.top_1(gates_without_top_1, experts_dim)
+  # [batch, experts]
+  mask_2 = mtf.one_hot(index_2, experts_dim, dtype=raw_gates.dtype)
+
+  denom = gate_1 + gate_2 + 1e-9
+  gate_1 /= denom
+  gate_2 /= denom
+
+  # BALANCING LOSSES
+  # shape = [batch, experts]
+  # We want to equalize the fraction of the batch assigned to each expert
+  density_1 = mask_1
+  # Something continuous that is correlated with what we want to equalize.
+  density_1_proxy = raw_gates
+  loss = (mtf.reduce_mean(density_1_proxy * density_1)
+          * float(experts_dim.size * experts_dim.size))
+
+  if hparams.moe_use_second_place_loss:
+    # Also add a loss to encourage all experts to be used equally also as the
+    # second-place expert.  Experimentally, this seems to be a wash.
+    # We want to equalize the fraction of the batch assigned to each expert:
+    density_2 = mask_2
+    # As a proxy for density_2, we renormalize the raw gates after the top one
+    # has been removed.
+    density_2_proxy = gates_without_top_1 / (
+        mtf.reduce_sum(gates_without_top_1, reduced_dim=experts_dim) + 1e-9)
+    loss_2 = (mtf.reduce_mean(density_2_proxy * density_2)
+              * float(experts_dim.size * experts_dim.size))
+    loss += loss_2 * 0.5
+ 
+  # loss = loss * 0.0  # remove balancing loss
+
+  # Depending on the policy in the hparams, we may drop out some of the
+  # second-place experts.
+  policy = (
+      hparams.moe_second_policy_train if train else
+      hparams.moe_second_policy_eval)
+  threshold = (
+      hparams.moe_second_threshold_train if train else
+      hparams.moe_second_threshold_eval)
+  if policy == "all":
+    # Use second-place experts for all examples.
+    pass
+  elif policy == "none":
+    # Never use second-place experts for all examples.
+    mask_2 = mtf.zeros_like(mask_2)
+  elif policy == "threshold":
+    # Use second-place experts if gate_2 > threshold.
+    mask_2 *= mtf.to_float(mtf.greater(gate_2, threshold))
+  elif policy == "random":
+    # Use second-place experts with probablity min(1.0, gate_2 / threshold).
+    mask_2 *= mtf.to_float(
+        mtf.less(mtf.random_uniform(gate_2.mesh, gate_2.shape),
+                 gate_2 / max(threshold, 1e-9)))
+  else:
+    raise ValueError("Unknown policy %s" % policy)
+
+  # COMPUTE ASSIGNMENT TO EXPERTS
+  # [batch] - mostly ones, but zeros where something didn't fit
+  mask_1_flat = mtf.reduce_sum(mask_1, reduced_dim=experts_dim)
+  # Weight assigned to first expert.  [batch, group]
+  gate_1 *= mask_1_flat
+
+  mask_2_flat = mtf.reduce_sum(mask_2, reduced_dim=experts_dim)
+  gate_2 *= mask_2_flat
+
+  combine_tensor = (
+      gate_1 * mask_1_flat
+      * mtf.one_hot(index_1, experts_dim)
+      * mtf.one_hot(mtf.import_tf_tensor(gate_1.mesh, 0), top_k_dim) +
+      gate_2 * mask_2_flat
+      * mtf.one_hot(index_2, experts_dim)
+      * mtf.one_hot(mtf.import_tf_tensor(gate_2.mesh, 1), top_k_dim))
+
+  combine_tensor = mtf.cast(combine_tensor, inputs.dtype)
+  loss = mtf.cast(loss, inputs.dtype)
+
+  dispatch_tensor = mtf.cast(
+      mtf.cast(combine_tensor, tf.bool), combine_tensor.dtype)
+
+  dispatch_tensor = mtf.Print(
+      dispatch_tensor,
+      [mtf.reduce_sum(mtf.cwise(
+          tf.clip_by_value,
+          [mtf.reduce_sum(dispatch_tensor, output_shape=[experts_dim]),
+           mtf.import_tf_tensor(dispatch_tensor.mesh, 0.0),
+           mtf.import_tf_tensor(dispatch_tensor.mesh, 1.0)]))],
+      "active_experts")
+
+  dispatch_tensor = mtf.Print(
+      dispatch_tensor,
+      [mtf.reduce_max(
+           mtf.reduce_sum(dispatch_tensor, output_shape=[experts_dim]))],
+      "max_inputs")
 
   return dispatch_tensor, combine_tensor, loss
 
