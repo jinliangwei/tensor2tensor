@@ -101,13 +101,7 @@ def transformer_moe_layer_v1(inputs, output_dim, hparams, train,
   batch_dim_unsplit = mtf.Dimension("batch_unsplit", batch_dim.size)
 
   if hparams.moe_gating == "top_2":
-    # dispatch_tensor, combine_tensor, loss = _top_2_gating(
-    #     inputs=inputs,
-    #     outer_expert_dims=None,
-    #     experts_dim=experts_dim_unsplit,
-    #     expert_capacity_dim=expert_capacity_dim,
-    #     hparams=hparams,
-    #     train=train)
+    # [batch, experts, top-k]
     dispatch_tensor, combine_tensor, loss = _top_k_gating(
         inputs=inputs,
         experts_dim=experts_dim_unsplit,
@@ -118,13 +112,9 @@ def transformer_moe_layer_v1(inputs, output_dim, hparams, train,
     raise ValueError("unknown hparams.moe_gating=%s" % hparams.moe_gating)
 
   # put num_experts dimension first to make split easier in alltoall
-  # expert_inputs = mtf.einsum([inputs, dispatch_tensor], mtf.Shape(
-  #     [experts_dim_unsplit, batch_dim, expert_capacity_dim, input_dim]))
   expert_inputs = mtf.einsum([inputs, dispatch_tensor], mtf.Shape(
       [experts_dim_unsplit, batch_dim, top_k_dim, input_dim]))
 
-  # expert_inputs = mtf.reshape(expert_inputs, mtf.Shape(
-  #     [experts_dim, batch_dim_unsplit, expert_capacity_dim, input_dim]))
   expert_inputs = mtf.reshape(expert_inputs, mtf.Shape(
       [experts_dim, batch_dim_unsplit, top_k_dim, input_dim]))
 
@@ -137,8 +127,6 @@ def transformer_moe_layer_v1(inputs, output_dim, hparams, train,
       h, output_dim, expert_dims=[experts_dim], use_bias=False,
       master_dtype=master_dtype, slice_dtype=slice_dtype, name="x1")
 
-  # expert_output = mtf.reshape(expert_output, mtf.Shape(
-  #     [experts_dim_unsplit, batch_dim, expert_capacity_dim, input_dim]))
   expert_output = mtf.reshape(expert_output, mtf.Shape(
       [experts_dim_unsplit, batch_dim, top_k_dim, input_dim]))
 
