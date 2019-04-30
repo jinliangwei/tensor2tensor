@@ -9,8 +9,10 @@ HPARAMS=mtf_transformer_tiny_lm_moe
 TRAIN_STEPS=100000
 
 MESH_SIZE=$OMPI_COMM_WORLD_SIZE
-MESH_SHAPE="batch:1;model:$MESH_SIZE"
-LAYOUT="batch:batch;vocab:model;d_ff:model;heads:model;experts:model"
+#MESH_SHAPE="batch:1;model:$MESH_SIZE"
+#LAYOUT="batch:batch;vocab:model;d_ff:model;heads:model;experts:model"
+MESH_SHAPE="all:$MESH_SIZE"
+LAYOUT="batch:all;experts:all"
 NUM_EXPERTS=80
 
 TRAIN_DIR=/proj/BigLearning/aqiao/t2t_train_single/$PROBLEM/$MODEL-$HPARAMS

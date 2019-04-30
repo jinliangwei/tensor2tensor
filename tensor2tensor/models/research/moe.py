@@ -27,6 +27,109 @@ import mesh_tensorflow as mtf
 import tensorflow as tf
 
 
+class DynamicExpertsOperation(mtf.Operation):
+  def __init__(self,
+               inputs,
+               dispatch_tensor,
+               combine_tensor,
+               experts_dim,
+               output_dim,
+               name=None):
+    super(ExpertsOperation, self).__init__(
+        [inputs, dispatch_tensor, combine_tensor], name=name or "experts")
+    self._inputs = inputs
+    self._dispatch_tensor = dispatch_tensor
+    self._experts_dim = experts_dim
+    output_shape = mtf.shape(inputs.shape[0], output_dim)
+    self._outputs = [mtf.Tensor(self, output_shape, tf.float32)]
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_splittable_and_unsplittable_dims(
+            "unsplittable", [dim.name for dim in splittable_dims]))
+
+  @property
+  def has_gradient(self):
+    return True
+
+  def gradient(self, grad_ys):
+    return mtf.GenericGradOperation(self, grad_ys).outputs
+
+  def lower(self, lowering):
+    mesh_impl = lowering.mesh_impl(self)
+    laid_out_pnum = mesh_impl.laid_out_pnum()
+
+    # List of expert_ids, per pnum
+    expert_ids = []
+    for pnum in range(mesh_impl.size):
+      begin = mesh_impl.slice_begin(mtf.Shape([self._experts_dim]), pnum)
+      shape = mesh_impl.slice_shape(mtf.Shape([self._experts_dim]))
+      expert_ids.append(list(range(begin[0], begin[0] + shape[0])))
+
+    # List of coords, per pnum
+    pcoords = []
+    for axis in range(mesh_impl.ndims):
+      pcoords.append(mesh_impl.laid_out_pcoord(axis).tensor_list)
+    pcoords = mtf.transpose_list_of_lists(pcoords)
+
+    # List of pnums to gather inputs from, per pnum
+    batch_axis = mesh_impl.tensor_dimension_to_mesh_axis(self._inputs.shape[0])
+    inputs_from = [[] for pnum in range(mesh_impl.size)]
+    for pnum in range(mesh_impl.size):
+      for from_pnum in range(mesh_impl.size):
+        for axis in range(mesh_impl.ndims):
+          if (axis != batch_axis and pcoords[from_pnum][axis]
+                                     != pcoords[pnum][axis]):
+            break
+        else:
+          inputs_from[pnum].append(from_pnum)
+      if batch_axis is None:
+        # Entire batch is replicated, only need to gather from local
+        assert len(inputs_from[pnum]) == 1 and inputs_from[pnum][0] == pnum
+      else:
+        # Batch is split, gather from each slice of the inputs
+        assert len(inputs_from[pnum]) == mesh_impl.shape[batch_axis].size
+
+    # List of input tensors for every expert id.
+    laid_out_inputs = lowering.tensors[self._inputs]
+    laid_out_dispatch_tensor = lowering.tensors[self._dispatch_tensor]
+    def experts_fn(pnum):
+      for from_pnum in inputs_from[pnum]:
+        from_tensor = laid_out_inputs.tensor_list[from_pnum]
+      dispatch_splits = tf.split(laid_out_dispatch_tensor.tensor_list[pnum],
+                                 len(inputs_from))
+      # FIXME: not sure if we can map tf.split results to mesh layout like this
+      for from_pnum, dispatch_split in zip(inputs_from[pnum], dispatch_splits):
+        for idx, expert_id in enumerate(expert_ids[pnum]):
+          pass
+   
+   
+   
+   
+   
+   
+    
+    values = mesh_impl.slicewise(
+        self._tf_fn, *[lowering.tensors[x] for x in self.inputs])
+    if len(self.outputs) == 1:
+      values = values,
+    for output, value in zip(self.outputs, values):
+      lowering.set_tensor_lowering(output, value)
+
+
+def dynamic_experts(inputs, dispatch_tensor, combine_tensor,
+                    experts_dim, output_dim, name=None):
+  batch_dim = inputs.shape[0]
+  batch_dim_unsplit = mtf.Dimension("batch_unsplit", batch_dim.size)
+  experts_dim_unsplit = mtf.Dimension("experts_unsplit", experts_dim.size)
+  top_k_dim = dispatch_tensor.shape[2]
+  dispatch_tensor = mtf.reshape(dispatch_tensor, mtf.Shape(
+      [batch_dim_unsplit, experts_dim, top_k_dim]))
+  combine_tensor = mtf.reshape(combine_tensor, mtf.Shape(
+      [batch_dim, experts_dim_unsplit, top_k_dim]))
+  op = DynamicExpertsOperation(inputs, dispatch_tensor, combine_tensor,
+                               experts_dim, output_dim, name)
+  return op.outputs[0]
+
+
 def transformer_moe_layer_v1(inputs, output_dim, hparams, train,
                              master_dtype=tf.bfloat16,
                              slice_dtype=tf.float32):
@@ -110,6 +213,9 @@ def transformer_moe_layer_v1(inputs, output_dim, hparams, train,
         train=train)
   else:
     raise ValueError("unknown hparams.moe_gating=%s" % hparams.moe_gating)
+
+  # output = dynamic_experts(inputs, dispatch_tensor, combine_tensor,
+  #                          experts_dim, output_dim)
 
   # put num_experts dimension first to make split easier in alltoall
   expert_inputs = mtf.einsum([inputs, dispatch_tensor], mtf.Shape(
@@ -653,9 +759,9 @@ def _top_k_gating(inputs, experts_dim, top_k_dim, hparams, train):
 
   Returns:
     dispatch_tensor: a Tensor with shape
-      [<batch_dims>, experts_dim, expert_capacity_dim]
+      [<batch_dims>, experts_dim, top_k_dim]
     combine_tensor: a Tensor with shape
-      [<batch_dims>, experts_dim, expert_capacity_dim]
+      [<batch_dims>, experts_dim, top_k_dim]
     loss: a mtf scalar
 
   Raises:
