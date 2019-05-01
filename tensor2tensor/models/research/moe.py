@@ -120,11 +120,10 @@ def dynamic_experts(inputs, dispatch_tensor, combine_tensor,
   batch_dim = inputs.shape[0]
   batch_dim_unsplit = mtf.Dimension("batch_unsplit", batch_dim.size)
   experts_dim_unsplit = mtf.Dimension("experts_unsplit", experts_dim.size)
-  top_k_dim = dispatch_tensor.shape[2]
   dispatch_tensor = mtf.reshape(dispatch_tensor, mtf.Shape(
-      [batch_dim_unsplit, experts_dim, top_k_dim]))
+      [batch_dim_unsplit, experts_dim]))
   combine_tensor = mtf.reshape(combine_tensor, mtf.Shape(
-      [batch_dim, experts_dim_unsplit, top_k_dim]))
+      [batch_dim, experts_dim_unsplit]))
   op = DynamicExpertsOperation(inputs, dispatch_tensor, combine_tensor,
                                experts_dim, output_dim, name)
   return op.outputs[0]
@@ -219,10 +218,10 @@ def transformer_moe_layer_v1(inputs, output_dim, hparams, train,
 
   # put num_experts dimension first to make split easier in alltoall
   expert_inputs = mtf.einsum([inputs, dispatch_tensor], mtf.Shape(
-      [experts_dim_unsplit, batch_dim, top_k_dim, input_dim]))
+      [experts_dim_unsplit, batch_dim, input_dim]))
 
   expert_inputs = mtf.reshape(expert_inputs, mtf.Shape(
-      [experts_dim, batch_dim_unsplit, top_k_dim, input_dim]))
+      [experts_dim, batch_dim_unsplit, input_dim]))
 
   # Now feed the expert inputs through the experts.
   h = mtf.layers.dense(
@@ -234,7 +233,7 @@ def transformer_moe_layer_v1(inputs, output_dim, hparams, train,
       master_dtype=master_dtype, slice_dtype=slice_dtype, name="x1")
 
   expert_output = mtf.reshape(expert_output, mtf.Shape(
-      [experts_dim_unsplit, batch_dim, top_k_dim, input_dim]))
+      [experts_dim_unsplit, batch_dim, input_dim]))
 
   output = mtf.einsum([expert_output, combine_tensor], mtf.Shape(
       [batch_dim, output_dim]))
@@ -733,23 +732,6 @@ def _top_k_gating(inputs, experts_dim, top_k_dim, hparams, train):
     hparams.moe_second_policy_eval: a string
     hparams.moe_second_threshold: a float
 
-  The returned forward assignment is a tensor used to map (via einsum) from the
-  inputs to the expert_inputs.  Likewise, the returned combine_tensor is
-  used to map (via einsum) from the expert outputs to the outputs.  Both the
-  forward and backward assignments are mostly zeros.  The shapes of the tensors
-  are as follows.
-
-  inputs: [<batch_dims>, input_dim]
-  dispatch_tensor:
-    [<batch_dims>, experts_dim, top_k_dim]
-  expert_inputs:
-    [<batch_dims>, experts_dim, top_k_dim, input_dim]
-
-  expert_outputs: [<batch_dims>, experts_dim, top_k_dim, output_dim]
-  combine_tensor:
-    [<batch_dims>, experts_dim, top_k_dim]
-  outputs: [<batch_dims>, output_dim]
-
   Args:
     inputs: a mtf.Tensor with shape [<batch_dims>, input_dim]
     experts_dim: a Dimension (the number of experts)
@@ -759,9 +741,9 @@ def _top_k_gating(inputs, experts_dim, top_k_dim, hparams, train):
 
   Returns:
     dispatch_tensor: a Tensor with shape
-      [<batch_dims>, experts_dim, top_k_dim]
+      [<batch_dims>, experts_dim]
     combine_tensor: a Tensor with shape
-      [<batch_dims>, experts_dim, top_k_dim]
+      [<batch_dims>, experts_dim]
     loss: a mtf scalar
 
   Raises:
@@ -860,6 +842,9 @@ def _top_k_gating(inputs, experts_dim, top_k_dim, hparams, train):
 
   dispatch_tensor = mtf.cast(
       mtf.cast(combine_tensor, tf.bool), combine_tensor.dtype)
+
+  combine_tensor = mtf.reduce_sum(combine_tensor, reduced_dim=top_k_dim)
+  dispatch_tensor = mtf.reduce_sum(dispatch_tensor, reduced_dim=top_k_dim)
 
   dispatch_tensor = mtf.Print(
       dispatch_tensor,
