@@ -84,6 +84,7 @@ class DynamicExpertsOperation(mtf.Operation):
     super(DynamicExpertsOperation, self).__init__(
         [inputs, combine_tensor], name=name or "experts")
         #[inputs, dispatch_tensor, combine_tensor], name=name or "experts")
+    self._name = name
     self._expert_inputs = inputs
     self._dispatch_tensor = dispatch_tensor
     self._combine_tensor = combine_tensor
@@ -97,6 +98,7 @@ class DynamicExpertsOperation(mtf.Operation):
     #self._splittable_dims, self._unsplittable_dims = (
     #    self._initialize_splittable_and_unsplittable_dims(
     #        "unsplittable", [dim.name for dim in splittable_dims]))
+    self._scope_name = tf.get_variable_scope().name
 
   @property
   def has_gradient(self):
@@ -172,27 +174,27 @@ class DynamicExpertsOperation(mtf.Operation):
         stddev = self._input_dim.size ** -0.5
         seed = hash("hidden-{}".format(expert_id))
         initializer = tf.random_normal_initializer(stddev=stddev, seed=seed)
+        name = self._scope_name + "/" + self._name + "/hidden_" + str(expert_id)
         hidden_units = tf.layers.dense(
             expert_inputs,
             self._hidden_dim.size,
             activation=tf.nn.relu,
             use_bias=False,
             kernel_initializer=initializer,
-            name="dense-hidden-{}".format(expert_id),
-            reuse=tf.AUTO_REUSE,
+            name=name,
         )
         # dense layer for expert outputs
         stddev = self._hidden_dim.size ** -0.5
         seed = hash("output-{}".format(expert_id))
         initializer = tf.random_normal_initializer(stddev=stddev, seed=seed)
+        name = self._scope_name + "/" + self._name + "/output_" + str(expert_id)
         expert_outputs = tf.layers.dense(
             hidden_units,
             self._output_dim.size,
             activation=tf.nn.relu,
             use_bias=False,
             kernel_initializer=initializer,
-            name="dense-output-{}".format(expert_id),
-            reuse=tf.AUTO_REUSE,
+            name=name,
         )
         expert_outputs = tf.multiply(tf.expand_dims(input_weights, -1), expert_outputs)
         # split expert outputs
@@ -328,7 +330,7 @@ def transformer_moe_layer_v1(inputs, output_dim, hparams, train,
     raise ValueError("unknown hparams.moe_gating=%s" % hparams.moe_gating)
 
   output = dynamic_experts(inputs, dispatch_tensor, combine_tensor,
-                           experts_dim, hidden_dim, output_dim)
+                           experts_dim, hidden_dim, output_dim, name="experts")
 
   # put num_experts dimension first to make split easier in alltoall
   #expert_inputs = mtf.einsum([inputs, dispatch_tensor], mtf.Shape(
