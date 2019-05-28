@@ -109,7 +109,6 @@ class DynamicExpertsOperation(mtf.Operation):
       begin = mesh_impl.slice_begin(mtf.Shape([self._experts_dim]), pnum)
       shape = mesh_impl.slice_shape(mtf.Shape([self._experts_dim]))
       expert_ids.append(list(range(begin[0], begin[0] + shape[0])))
-    expert_ids = mesh_impl.LaidOutTensor(expert_ids)
 
     def experts_fn(inputs_slice, combine_slice, experts):
       inputs_indices_list = []
@@ -153,8 +152,11 @@ class DynamicExpertsOperation(mtf.Operation):
       expert_outputs = tf.concat(expert_outputs_list, 0)
       return tf.scatter_nd(tf.expand_dims(inputs_indices, -1), expert_outputs,
                            [inputs_slice.shape[0], self._output_dim.size])
-    outputs = mesh_impl.slicewise(experts_fn, self._expert_inputs,
-                                  self._combine_tensor, expert_ids)
+
+    outputs = mesh_impl.slicewise(experts_fn,
+                                  lowering.tensors[self._expert_inputs],
+                                  lowering.tensors[self._combine_tensor],
+                                  mesh_impl.LaidOutTensor(expert_ids))
 
     experts_axis = mesh_impl.tensor_dimension_to_mesh_axis(self._experts_dim)
     if experts_axis:
@@ -259,7 +261,8 @@ def transformer_moe_layer_v1(inputs, output_dim, hparams, train,
   else:
     raise ValueError("unknown hparams.moe_gating=%s" % hparams.moe_gating)
 
-  output = dynamic_experts(inputs, combine_tensor, experts_dim, hidden_dim, output_dim, name="experts")
+  output = dynamic_experts(inputs, combine_tensor, experts_dim,
+                           hidden_dim, output_dim, name="experts")
 
   # put num_experts dimension first to make split easier in alltoall
   #expert_inputs = mtf.einsum([inputs, dispatch_tensor], mtf.Shape(
