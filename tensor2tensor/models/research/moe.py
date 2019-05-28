@@ -102,7 +102,6 @@ class DynamicExpertsOperation(mtf.Operation):
 
   def lower(self, lowering):
     mesh_impl = lowering.mesh_impl(self)
-    laid_out_pnum = mesh_impl.laid_out_pnum()
 
     # List of expert_ids, per pnum
     expert_ids = []
@@ -110,46 +109,19 @@ class DynamicExpertsOperation(mtf.Operation):
       begin = mesh_impl.slice_begin(mtf.Shape([self._experts_dim]), pnum)
       shape = mesh_impl.slice_shape(mtf.Shape([self._experts_dim]))
       expert_ids.append(list(range(begin[0], begin[0] + shape[0])))
-    print("expert_ids", expert_ids)
+    expert_ids = mesh_impl.LaidOutTensor(expert_ids)
 
-    # Should concat inputs only along the batch dimension
-    batch_axis = mesh_impl.tensor_dimension_to_mesh_axis(self._expert_inputs.shape[0])
-    pnum_groups = [None] * mesh_impl.size  # my group
-    for pnum_group in mtf.processor_groups(mesh_impl.shape, [batch_axis]):
-      for pnum in pnum_group:
-        pnum_groups[pnum] = pnum_group
-    # FIXME: This only works when batch axis = expert axis in the mesh
-    inputs_from = outputs_from = pnum_groups
-    print("pnum groups", pnum_groups)
-
-    # List of input tensors for every expert id.
-    inputs_slices = lowering.tensors[self._expert_inputs].tensor_list
-    combine_slices = lowering.tensors[self._combine_tensor].tensor_list
-    def experts_fn(pnum):
-      combine_splits = tf.split(combine_slices[pnum], len(inputs_from))
-      input_ids_map = []
-      expert_outputs_map = []
-      # FIXME: not sure if we can map tf.split results to mesh layout like this
-      for idx, expert_id in enumerate(expert_ids[pnum]):
-        # gather from all slices of inputs tensor
-        expert_inputs_split = []
-        input_weights_split = []
-        input_ids_map.append({})
-        for from_pnum, combine_split in zip(inputs_from[pnum], combine_splits):
-          inputs_slice = inputs_slices[from_pnum]
-          input_ids = tf.squeeze(tf.where(combine_split[:,idx]), axis=1)
-          weights = tf.gather(combine_split[:,idx], input_ids)
-          expert_inputs_split.append(tf.gather(inputs_slice, input_ids))
-          input_weights_split.append(weights)
-          input_ids_map[-1][from_pnum] = input_ids
-        # concat expert inputs
-        #print_op = tf.print("gather for expert", expert_id, "is", *map(tf.shape, expert_inputs_split))
-        #with tf.control_dependencies([print_op]):
-        expert_inputs = tf.concat(expert_inputs_split, axis=0)
-        input_weights = tf.concat(input_weights_split, axis=0)
+    def experts_fn(inputs_slice, combine_slice, experts):
+      inputs_indices_list = []
+      expert_outputs_list = []
+      for idx, expert_id in enumerate(experts):
+        # gather from inputs tensor
+        inputs_indices = tf.squeeze(tf.where(combine_slice[:,idx]), axis=1)
+        inputs_weights = tf.gather(combine_slice[:,idx], inputs_indices)
+        expert_inputs = tf.gather(inputs_slice, inputs_indices)
         # TODO: use tf.cond to send dead signal
         # dense layer for hidden units
-        name = self._scope_name + "/" + self._name + "/hidden_" + str(expert_id)
+        name = self._scope_name + "/" + self._name + "/hid_" + str(expert_id)
         seed = hash(name)
         stddev = self._input_dim.size ** -0.5
         initializer = tf.random_normal_initializer(stddev=stddev, seed=seed)
@@ -162,7 +134,7 @@ class DynamicExpertsOperation(mtf.Operation):
             name=name,
         )
         # dense layer for expert outputs
-        name = self._scope_name + "/" + self._name + "/output_" + str(expert_id)
+        name = self._scope_name + "/" + self._name + "/out_" + str(expert_id)
         seed = hash(name)
         stddev = self._hidden_dim.size ** -0.5
         initializer = tf.random_normal_initializer(stddev=stddev, seed=seed)
@@ -173,43 +145,34 @@ class DynamicExpertsOperation(mtf.Operation):
             kernel_initializer=initializer,
             name=name,
         )
-        expert_outputs = tf.multiply(tf.expand_dims(input_weights, -1), expert_outputs)
-        # split expert outputs
-        sizes = tf.stack([tf.shape(t)[0] for t in expert_inputs_split])
-        expert_outputs_split = tf.split(expert_outputs, sizes)
-        expert_outputs_map.append(expert_outputs_split)
-      return input_ids_map, expert_outputs_map
-    # [pnum][expert_local_id][inputs_slice_id] -> input_local_ids/expert_outputs
-    input_ids_map, expert_outputs_map = zip(*mtf.parallel(mesh_impl.devices, experts_fn, laid_out_pnum.tensor_list))
+        expert_outputs = tf.multiply(tf.expand_dims(inputs_weights, -1),
+                                     expert_outputs)
+        inputs_indices_list.append(inputs_indices)
+        expert_outputs_list.append(expert_outputs)
+      inputs_indices = tf.concat(inputs_indices_list, 0)
+      expert_outputs = tf.concat(expert_outputs_list, 0)
+      return tf.scatter_nd(tf.expand_dims(inputs_indices, -1), expert_outputs,
+                           [inputs_slice.shape[0], self._output_dim.size])
+    outputs = mesh_impl.slicewise(experts_fn, self._expert_inputs,
+                                  self._combine_tensor, expert_ids)
+
+    experts_axis = mesh_impl.tensor_dimension_to_mesh_axis(self._experts_dim)
+    if experts_axis:
+      outputs = mesh_impl.allreduce(outputs, experts_axis, "SUM")
     
-    def combine_fn(pnum):
-      local_input_ids = []
-      local_expert_outputs = []
-      for from_pnum in outputs_from[pnum]:
-        for local_expert_id in range(len(input_ids_map[from_pnum])):
-          local_input_ids.append(input_ids_map[from_pnum][local_expert_id][pnum])
-          local_expert_outputs.append(expert_outputs_map[from_pnum][local_expert_id][pnum])
-      local_input_ids = tf.concat(local_input_ids, 0)
-      print_op = tf.print("input_ids", pnum, local_input_ids)
-      local_input_ids = tf.expand_dims(local_input_ids, -1)
-      local_expert_outputs = tf.concat(local_expert_outputs, 0)
-      with tf.control_dependencies([print_op]):
-        outputs = tf.scatter_nd(local_input_ids, local_expert_outputs,
-                                [inputs_slices[pnum].shape[0],
-                                 self._output_dim.size])
-      return outputs
-    outputs = mtf.parallel(mesh_impl.devices, combine_fn, laid_out_pnum.tensor_list)
-    lowering.set_tensor_lowering(self._outputs[0], mesh_impl.LaidOutTensor(outputs))
+    lowering.set_tensor_lowering(self._outputs[0], outputs)
 
 
-def dynamic_experts(inputs, combine_tensor, experts_dim, hidden_dim, output_dim, name=None):
+def dynamic_experts(inputs, combine_tensor, experts_dim, hidden_dim,
+                    output_dim, name=None):
   batch_dim = inputs.shape[0]
-  batch_dim_unsplit = mtf.Dimension("batch_unsplit", batch_dim.size)
-  experts_dim_unsplit = mtf.Dimension("experts_unsplit", experts_dim.size)
+  batch_dim_unsplit = mtf.Dimension("batch_dim_unsplit", batch_dim.size)
   combine_tensor = mtf.reshape(combine_tensor, mtf.Shape(
       [batch_dim_unsplit, experts_dim]))
-  op = DynamicExpertsOperation(inputs, combine_tensor, experts_dim, hidden_dim, output_dim, name)
-  return op.outputs[0]
+  inputs = mtf.reshape(inputs, mtf.Shape([batch_dim_unsplit, inputs.shape[1]]))
+  op = DynamicExpertsOperation(inputs, combine_tensor, experts_dim, hidden_dim,
+                               output_dim, name)
+  return mtf.reshape(op.outputs[0], mtf.Shape([batch_dim, output_dim]))
 
 
 def transformer_moe_layer_v1(inputs, output_dim, hparams, train,
