@@ -103,60 +103,62 @@ class DynamicExpertsOperation(mtf.Operation):
   def lower(self, lowering):
     mesh_impl = lowering.mesh_impl(self)
 
-    # List of expert_ids, per pnum
-    expert_ids = []
+    # List of group_ids, per pnum
+    group_size = 50
+    assert self._experts_dim.size % group_size == 0
+    num_groups = self._experts_dim.size // group_size
+    group_ids = []
     for pnum in range(mesh_impl.size):
       begin = mesh_impl.slice_begin(mtf.Shape([self._experts_dim]), pnum)
       shape = mesh_impl.slice_shape(mtf.Shape([self._experts_dim]))
-      expert_ids.append(list(range(begin[0], begin[0] + shape[0])))
+      assert begin[0] % group_size == 0 and shape[0] % group_size == 0
+      group_ids.append(list(range(begin[0] // group_size,
+                                  (begin[0] + shape[0]) // group_size)))
 
-    def experts_fn(inputs_slice, combine_slice, experts):
-      inputs_indices_list = []
-      expert_outputs_list = []
-      for idx, expert_id in enumerate(experts):
+    def experts_fn(inputs_slice, combine_slice, groups):
+      indices_list = []
+      outputs_list = []
+      for idx, group_id in enumerate(groups):
         # gather from inputs tensor
-        inputs_indices = tf.squeeze(tf.where(combine_slice[:,idx]), axis=1)
-        inputs_weights = tf.gather(combine_slice[:,idx], inputs_indices)
-        expert_inputs = tf.gather(inputs_slice, inputs_indices)
-        # TODO: use tf.cond to send dead signal
+        begin = idx * group_size
+        end = begin + group_size
+        indices = tf.where(combine_slice[:,begin:end])
+        weights = tf.squeeze(tf.gather_nd(combine_slice[:,begin:end], indices))
+        inputs = tf.gather(inputs_slice, indices[:,0])
         # dense layer for hidden units
-        name = self._scope_name + "/" + self._name + "/hid_" + str(expert_id)
+        name = self._scope_name + "/" + self._name + "/hid_" + str(group_id)
         seed = hash(name)
         stddev = self._input_dim.size ** -0.5
         initializer = tf.random_normal_initializer(stddev=stddev, seed=seed)
-        hidden_units = tf.layers.dense(
-            expert_inputs,
-            self._hidden_dim.size,
-            activation=tf.nn.relu,
-            use_bias=False,
-            kernel_initializer=initializer,
-            name=name,
-        )
+        kernel = tf.get_variable(
+            name, [group_size, self._input_dim.size, self._hidden_dim.size],
+            initializer=initializer, trainable=True)
+        one_hot = tf.one_hot(indices[:,1], group_size)
+        hidden = tf.einsum("bi,bg,gih->bh", inputs, one_hot, kernel)
+        hidden = tf.nn.relu(hidden)
         # dense layer for expert outputs
-        name = self._scope_name + "/" + self._name + "/out_" + str(expert_id)
+        name = self._scope_name + "/" + self._name + "/out_" + str(group_id)
         seed = hash(name)
         stddev = self._hidden_dim.size ** -0.5
         initializer = tf.random_normal_initializer(stddev=stddev, seed=seed)
-        expert_outputs = tf.layers.dense(
-            hidden_units,
-            self._output_dim.size,
-            use_bias=False,
-            kernel_initializer=initializer,
-            name=name,
-        )
-        expert_outputs = tf.multiply(tf.expand_dims(inputs_weights, -1),
-                                     expert_outputs)
-        inputs_indices_list.append(inputs_indices)
-        expert_outputs_list.append(expert_outputs)
-      inputs_indices = tf.concat(inputs_indices_list, 0)
-      expert_outputs = tf.concat(expert_outputs_list, 0)
-      return tf.scatter_nd(tf.expand_dims(inputs_indices, -1), expert_outputs,
+        kernel = tf.get_variable(
+            name, [group_size, self._hidden_dim.size, self._output_dim.size],
+            initializer=initializer, trainable=True)
+        one_hot = tf.one_hot(indices[:,1], group_size)
+        output = tf.einsum("bh,gho,bg->bo", hidden, kernel, one_hot)
+
+        output = tf.multiply(tf.expand_dims(weights, -1), output)
+        indices_list.append(indices[:,0])
+        outputs_list.append(output)
+      indices = tf.concat(indices_list, 0)
+      outputs = tf.concat(outputs_list, 0)
+      return tf.scatter_nd(tf.expand_dims(indices, -1), outputs,
                            [inputs_slice.shape[0], self._output_dim.size])
 
     outputs = mesh_impl.slicewise(experts_fn,
                                   lowering.tensors[self._expert_inputs],
                                   lowering.tensors[self._combine_tensor],
-                                  mesh_impl.LaidOutTensor(expert_ids))
+                                  mesh_impl.LaidOutTensor(group_ids))
 
     experts_axis = mesh_impl.tensor_dimension_to_mesh_axis(self._experts_dim)
     if experts_axis:
@@ -748,20 +750,20 @@ def _top_2_gating(
   dispatch_tensor = mtf.cast(
       mtf.cast(combine_tensor, tf.bool), combine_tensor.dtype)
 
-  dispatch_tensor = mtf.Print(
-      dispatch_tensor,
-      [mtf.reduce_sum(mtf.cwise(
-          tf.clip_by_value,
-          [mtf.reduce_sum(dispatch_tensor, output_shape=[experts_dim]),
-           mtf.import_tf_tensor(dispatch_tensor.mesh, 0.0),
-           mtf.import_tf_tensor(dispatch_tensor.mesh, 1.0)]))],
-      "active_experts")
+  #dispatch_tensor = mtf.Print(
+  #    dispatch_tensor,
+  #    [mtf.reduce_sum(mtf.cwise(
+  #        tf.clip_by_value,
+  #        [mtf.reduce_sum(dispatch_tensor, output_shape=[experts_dim]),
+  #         mtf.import_tf_tensor(dispatch_tensor.mesh, 0.0),
+  #         mtf.import_tf_tensor(dispatch_tensor.mesh, 1.0)]))],
+  #    "active_experts")
 
-  dispatch_tensor = mtf.Print(
-      dispatch_tensor,
-      [mtf.reduce_max(
-           mtf.reduce_sum(dispatch_tensor, output_shape=[experts_dim]))],
-      "max_inputs")
+  #dispatch_tensor = mtf.Print(
+  #    dispatch_tensor,
+  #    [mtf.reduce_max(
+  #         mtf.reduce_sum(dispatch_tensor, output_shape=[experts_dim]))],
+  #    "max_inputs")
 
   return dispatch_tensor, combine_tensor, loss
 
@@ -894,20 +896,20 @@ def _top_k_gating(inputs, experts_dim, top_k_dim, hparams, train):
   combine_tensor = mtf.reduce_sum(combine_tensor, reduced_dim=top_k_dim)
   dispatch_tensor = mtf.reduce_sum(dispatch_tensor, reduced_dim=top_k_dim)
 
-  dispatch_tensor = mtf.Print(
-      dispatch_tensor,
-      [mtf.reduce_sum(mtf.cwise(
-          tf.clip_by_value,
-          [mtf.reduce_sum(dispatch_tensor, output_shape=[experts_dim]),
-           mtf.import_tf_tensor(dispatch_tensor.mesh, 0.0),
-           mtf.import_tf_tensor(dispatch_tensor.mesh, 1.0)]))],
-      "active_experts")
+  #dispatch_tensor = mtf.Print(
+  #    dispatch_tensor,
+  #    [mtf.reduce_sum(mtf.cwise(
+  #        tf.clip_by_value,
+  #        [mtf.reduce_sum(dispatch_tensor, output_shape=[experts_dim]),
+  #         mtf.import_tf_tensor(dispatch_tensor.mesh, 0.0),
+  #         mtf.import_tf_tensor(dispatch_tensor.mesh, 1.0)]))],
+  #    "active_experts")
 
-  dispatch_tensor = mtf.Print(
-      dispatch_tensor,
-      [mtf.reduce_max(
-           mtf.reduce_sum(dispatch_tensor, output_shape=[experts_dim]))],
-      "max_inputs")
+  #dispatch_tensor = mtf.Print(
+  #    dispatch_tensor,
+  #    [mtf.reduce_max(
+  #         mtf.reduce_sum(dispatch_tensor, output_shape=[experts_dim]))],
+  #    "max_inputs")
 
   return dispatch_tensor, combine_tensor, loss
 
