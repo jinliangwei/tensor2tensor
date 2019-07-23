@@ -53,7 +53,8 @@ class DynamicExpertsGradOperation(mtf.Operation):
         [lowering.tensors[x].tensor_list for x in self._forward_op.inputs])
     all_grad_ys = mtf.transpose_list_of_lists(
         [lowering.tensors[dy].tensor_list for dy in self._grad_ys])
-    all_grad_xs = [tf.gradients(ys=ys, xs=xs, grad_ys=grad_ys) for
+    all_grad_xs = [tf.gradients(ys=ys, xs=xs, grad_ys=grad_ys,
+                                colocate_gradients_with_ops=True) for
                    ys, xs, grad_ys in zip(all_ys, all_xs, all_grad_ys)]
     for xs in all_xs:
       for grad_xs in all_grad_xs:
@@ -61,10 +62,11 @@ class DynamicExpertsGradOperation(mtf.Operation):
         for i in range(len(xs)):
           gx = grad_xs[i]
           if isinstance(gx, tf.IndexedSlices):
-            grad_xs[i] = tf.scatter_nd(tf.expand_dims(gx.indices, -1),
-                                       gx.values, xs[i].shape)
-            #grad_xs[i] = tf.sparse_to_dense(grad_xs[i].indices, xs[i].shape,
-            #                                grad_xs[i].values)
+            with tf.device(gx.values.device):
+              grad_xs[i] = tf.scatter_nd(tf.expand_dims(gx.indices, -1),
+                                         gx.values, xs[i].shape)
+              #grad_xs[i] = tf.sparse_to_dense(grad_xs[i].indices, xs[i].shape,
+              #                                grad_xs[i].values)
     grad_xs = mtf.transpose_list_of_lists(all_grad_xs)
     for out, grad_x in zip(self.outputs, grad_xs):
       lowering.set_tensor_lowering(
@@ -104,7 +106,7 @@ class DynamicExpertsOperation(mtf.Operation):
     mesh_impl = lowering.mesh_impl(self)
 
     # List of group_ids, per pnum
-    group_size = 50
+    group_size = 100
     assert self._experts_dim.size % group_size == 0
     num_groups = self._experts_dim.size // group_size
     group_ids = []
