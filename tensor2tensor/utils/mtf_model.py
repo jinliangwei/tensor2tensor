@@ -69,6 +69,9 @@ class MtfModel(t2t_model.T2TModel):
     global_step = tf.train.get_global_step()
 
     mesh_shape = mtf.convert_to_shape(hparams.mesh_shape)
+    device_shape = None
+    if hasattr(hparams, "device_shape"):
+      device_shape = mtf.convert_to_shape(hparams.device_shape)
     layout_rules = mtf.convert_to_layout_rules(hparams.layout)
     if use_tpu:
       ctx = params["context"]
@@ -93,7 +96,7 @@ class MtfModel(t2t_model.T2TModel):
         assert len(data_parallelism.ps_devices) == mesh_shape.size
         mesh_devices = data_parallelism.ps_devices
       mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
-          mesh_shape, layout_rules, mesh_devices)
+          mesh_shape, layout_rules, mesh_devices, device_shape=device_shape)
 
     graph = mtf.Graph()
     mesh = mtf.Mesh(graph, "my_mesh", var_placer)

@@ -677,6 +677,7 @@ def mtf_transformer_base():
   hparams.label_smoothing = 0.1
   # 8-way model-parallelism
   hparams.add_hparam("mesh_shape", "model:8")
+  hparams.add_hparam("device_shape", "")
   hparams.add_hparam("layout", "batch:batch;vocab:model;d_ff:model;heads:model")
   hparams.add_hparam("num_heads", 8)
   hparams.add_hparam("d_ff", 2048)
@@ -771,6 +772,30 @@ def mtf_transformer_tiny_lm():
   hparams.transformer_type = "decoder"
   hparams.label_smoothing = 0.0
   hparams.sampling_method = "random"
+  return hparams
+
+
+@registry.register_hparams
+def mtf_transformer_base_lm_moe():
+  hparams = mtf_transformer_base_lm()
+  hparams.encoder_layers = ["att", "moe"] * 2
+  hparams.decoder_layers = hparams.encoder_layers
+  hparams.layout += ";experts:model"
+  moe.set_default_moe_hparams(hparams)
+  hparams.moe_num_experts = 400
+  return hparams
+
+
+@registry.register_hparams
+def mtf_transformer_moe():
+  hparams = mtf_transformer_base()
+  hparams.encoder_layers = ["att", "moe"] * 6
+  hparams.decoder_layers = ["att", "enc_att", "moe"] * 6
+  moe.set_default_moe_hparams(hparams)
+  hparams.moe_num_experts = 64
+  hparams.batch_size = 16
+  hparams.layout += ";experts:model"
+  hparams.mesh_shape = "model:4"
   return hparams
 
 
