@@ -776,13 +776,21 @@ def mtf_transformer_tiny_lm():
 
 
 @registry.register_hparams
-def mtf_transformer_base_lm_moe():
+def mtf_transformer_lm_moe():
   hparams = mtf_transformer_base_lm()
-  hparams.encoder_layers = ["att", "moe"] * 2
+  hparams.encoder_layers = ["att", "moe"] * 6
   hparams.decoder_layers = hparams.encoder_layers
-  hparams.layout += ";experts:model"
   moe.set_default_moe_hparams(hparams)
-  hparams.moe_num_experts = 400
+  return hparams
+
+
+@registry.register_hparams
+def mtf_transformer_wide_lm():
+  hparams = mtf_transformer_base_lm()
+  hparams.encoder_layers = ["att", "drd"] * 6
+  hparams.encoder_layers[5] = "moe"
+  hparams.decoder_layers = hparams.encoder_layers
+  moe.set_default_moe_hparams(hparams)
   return hparams
 
 
